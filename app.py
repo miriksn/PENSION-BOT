@@ -1,6 +1,6 @@
 import streamlit as st
-import google.generativeai as genai
 import pypdf
+from openai import OpenAI
 
 st.set_page_config(
     page_title="בודק הפנסיה - pensya.info", 
@@ -10,27 +10,30 @@ st.set_page_config(
 
 # אבטחה: משיכת המפתח
 try:
-    API_KEY = st.secrets["GEMINI_API_KEY"]
-    genai.configure(api_key=API_KEY)
+    API_KEY = st.secrets["OPENAI_API_KEY"]
+    client = OpenAI(api_key=API_KEY)
 except Exception as e:
-    st.error("⚠️ שגיאה: מפתח ה-API לא נמצא.")
+    st.error("⚠️ שגיאה: מפתח ה-API לא נמצא בכספת (Secrets).")
+    st.info("הוסף את OPENAI_API_KEY ב-Streamlit Secrets")
     st.stop()
 
 st.title("🔍 בודק דמי ניהול אוטומטי")
-st.write("העלה דוח פנסיוני בפורמט PDF")
+st.write("העלה דוח פנסיוני בפורמט PDF לניתוח מהיר")
 
 with st.expander("ℹ️ מה הסטנדרטים?"):
     st.write("""
     **דמי ניהול תקינים:**
     - 🏦 מהפקדה: עד 1.0%
     - 💰 על צבירה: עד 0.145% בשנה
+    
+    דמי ניהול גבוהים יכולים לשחוק עשרות אלפי שקלים מהפנסיה לאורך שנים!
     """)
 
 file = st.file_uploader("📄 בחר קובץ PDF", type=['pdf'])
 
 @st.cache_data
 def extract_pdf_text(pdf_file):
-    """חילוץ טקסט"""
+    """חילוץ טקסט מ-PDF"""
     reader = pypdf.PdfReader(pdf_file)
     full_text = ""
     for page in reader.pages:
@@ -39,86 +42,116 @@ def extract_pdf_text(pdf_file):
             full_text += t + "\n"
     return full_text
 
-def analyze_with_gemini(text):
-    """ניתוח - כפה שימוש ב-gemini-pro בלבד"""
+def analyze_with_openai(text):
+    """ניתוח עם OpenAI GPT-4"""
     try:
-        # ניסיון 1: gemini-pro פשוט
-        model = genai.GenerativeModel('gemini-pro')
-        st.info("🔄 משתמש במודל: gemini-pro")
-    except:
-        try:
-            # ניסיון 2: עם prefix
-            model = genai.GenerativeModel('models/gemini-pro')
-            st.info("🔄 משתמש במודל: models/gemini-pro")
-        except:
-            st.error("❌ לא הצלחתי ליצור חיבור למודל")
-            st.warning("""
-            **בדוק:**
-            1. המפתח ב-Secrets תקין
-            2. ה-API מופעל: https://console.cloud.google.com/apis/library/generativelanguage.googleapis.com
-            3. נסה ליצור מפתח חדש
-            """)
-            return None
-    
-    prompt = f"""אתה מומחה לניתוח דוחות פנסיה ישראליים.
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",  # זול ומהיר - 0.15$ לכל מליון tokens
+            messages=[
+                {
+                    "role": "system",
+                    "content": """אתה מומחה לניתוח דוחות פנסיה ישראליים.
+תפקידך לחלץ דמי ניהול ולהעריך אם הם גבוהים.
 
-חלץ מהטקסט:
-1. **דמי ניהול מהפקדה** (%)
-2. **דמי ניהול על צבירה** (%)
+סטנדרטים:
+- דמי ניהול מהפקדה: מעל 1.0% = גבוה
+- דמי ניהול על צבירה: מעל 0.145% = גבוה"""
+                },
+                {
+                    "role": "user",
+                    "content": f"""נתח את הדוח הבא וחלץ:
 
-השווה לסטנדרט:
-- מהפקדה: מעל 1.0% = גבוה
-- צבירה: מעל 0.145% = גבוה
+1. **דמי ניהול מהפקדה** (באחוזים)
+2. **דמי ניהול על צבירה** (באחוזים שנתיים)
 
-פורמט תשובה:
+פורמט התשובה:
 
 ### 📊 מה מצאתי:
-- דמי הפקדה: X%
-- דמי צבירה: Y%
+- דמי ניהול מהפקדה: X%
+- דמי ניהול על צבירה: Y%
 
 ### ⚖️ הערכה:
-[גבוה/סביר/נמוך]
+[האם הם גבוהים/סבירים/נמוכים ביחס לסטנדרט]
 
-### 💡 המלצה:
-[משפט אחד]
+### 💡 המלצה קצרה:
+[1-2 משפטים]
 
-טקסט:
-{text[:12000]}"""
-    
-    try:
-        response = model.generate_content(prompt)
-        return response.text
+---
+
+**טקסט הדוח:**
+{text[:15000]}"""
+                }
+            ],
+            temperature=0.3,  # יותר דטרמיניסטי
+            max_tokens=1000
+        )
+        
+        return response.choices[0].message.content
+        
     except Exception as e:
-        st.error(f"שגיאה ביצירת תוכן: {e}")
+        error_msg = str(e)
+        if "insufficient_quota" in error_msg or "quota" in error_msg.lower():
+            st.error("❌ חריגה מהמכסה או שהחשבון לא מופעל")
+            st.info("""
+            **פתרונות:**
+            1. ודא שהוספת כרטיס אשראי: https://platform.openai.com/settings/organization/billing/overview
+            2. בדוק שיש לך קרדיט: https://platform.openai.com/usage
+            3. המתן מספר דקות ונסה שוב
+            """)
+        elif "invalid" in error_msg.lower():
+            st.error("❌ מפתח API לא תקין")
+            st.info("ודא שהעתקת את המפתח המלא מ-OpenAI")
+        else:
+            st.error(f"❌ שגיאה: {error_msg}")
         return None
 
 if file:
     try:
-        with st.spinner("🔄 מנתח..."):
+        with st.spinner("🔄 מנתח דוח... אנא המתן"):
+            # חילוץ טקסט
             full_text = extract_pdf_text(file)
             
             if not full_text or len(full_text.strip()) < 50:
                 st.error("❌ לא הצלחתי לקרוא טקסט מהקובץ")
+                st.warning("""
+                **סיבות אפשריות:**
+                - הקובץ מוצפן או מוגן
+                - הקובץ הוא תמונה סרוקה (לא PDF טקסטואלי)
+                - הקובץ פגום
+                
+                💡 נסה להמיר את הקובץ או להוריד מחדש
+                """)
                 st.stop()
             
-            analysis = analyze_with_gemini(full_text)
+            # הצגת מידע על אורך הטקסט
+            st.info(f"📄 חולץ טקסט: {len(full_text)} תווים")
+            
+            # ניתוח עם OpenAI
+            analysis = analyze_with_openai(full_text)
             
             if analysis:
                 st.success("✅ הניתוח הושלם!")
                 st.markdown(analysis)
                 
+                # כפתור להורדה
                 st.download_button(
                     label="📥 הורד תוצאות",
                     data=analysis,
                     file_name="pension_analysis.txt",
                     mime="text/plain"
                 )
+                
+                # הצגת עלות משוערת (אופציונלי)
+                estimated_cost = (len(full_text) / 1000) * 0.00015  # GPT-4o-mini pricing
+                st.caption(f"💰 עלות משוערת: ${estimated_cost:.4f}")
             
     except Exception as e:
-        st.error(f"❌ שגיאה כללית: {e}")
+        st.error(f"❌ אירעה שגיאה: {e}")
         
         with st.expander("🔧 פרטים טכניים"):
             st.code(str(e))
 
+# כותרת תחתונה
 st.markdown("---")
-st.caption("🏦 pensya.info")
+st.caption("🏦 פותח על ידי pensya.info | מופעל על ידי OpenAI GPT-4")
+st.caption("זהו כלי עזר בלבד ואינו מהווה ייעוץ פנסיוני מקצועי")
