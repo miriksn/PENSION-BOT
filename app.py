@@ -3,37 +3,44 @@ import google.generativeai as genai
 import pypdf
 
 # --- הגדרת המפתח שלך ---
-# החלף את הטקסט במרכאות במפתח ה-API האמיתי שלך
 API_KEY = "AIzaSyBrvKibfRFWjnmSm4LTFHtaqLEoZZVcrgU"
 genai.configure(api_key=API_KEY)
 
 st.set_page_config(page_title="בודק הפנסיה - pensya.info", layout="centered")
 st.title("🔍 בודק דמי ניהול אוטומטי")
-st.write("העלה דוח שנתי או רבעוני (PDF או תמונה)")
+st.write("העלה דוח שנתי או רבעוני (PDF)")
 
-file = st.file_uploader("בחר קובץ", type=['png', 'jpg', 'jpeg', 'pdf'])
+file = st.file_uploader("בחר קובץ PDF", type=['pdf'])
 
 if file:
     st.info("מנתח נתונים, אנא המתן...")
     try:
+        # 1. חילוץ טקסט מה-PDF אצלנו בשרת (לא אצל גוגל)
+        reader = pypdf.PdfReader(file)
+        full_text = ""
+        for page in reader.pages:
+            full_text += page.extract_text()
+        
+        # 2. בניית דגם הבינה המלאכותית
         model = genai.GenerativeModel('gemini-1.5-flash')
         
-        # זיהוי סוג הקובץ וקריאת התוכן
-        if file.type == "application/pdf":
-            # קריאת טקסט ישירות מה-PDF - עוקף את שגיאת ה-404
-            reader = pypdf.PdfReader(file)
-            pdf_text = ""
-            for page in reader.pages:
-                pdf_text += page.extract_text()
-            
-            prompt = f"מתוך הטקסט הבא של דוח פנסיוני, מצא את דמי הניהול מהפקדה ומצבירה. אם דמי הניהול מהפקדה מעל 1% או מצבירה מעל 0.145%, ציין שהם גבוהים. החזר תשובה בעברית הכוללת את המספרים שנמצאו:\n\n{pdf_text}"
-            response = model.generate_content(prompt)
-        else:
-            # טיפול בתמונה (צילום מסך)
-            from PIL import Image
-            img = Image.open(file)
-            prompt = "נתח את דמי הניהול בתמונה המצורפת: הפקדה (מעל 1% זה גבוה) וצבירה (מעל 0.145% זה גבוה). החזר תשובה בעברית עם האחוזים שמצאת."
-            response = model.generate_content([prompt, img])
+        # 3. שליחת הטקסט בלבד כהודעה רגילה
+        prompt = f"""
+        להלן טקסט מתוך דוח פנסיוני. 
+        משימה: מצא את דמי הניהול מהפקדה (דמי ניהול מהתשלומים) ודמי הניהול מצבירה (דמי ניהול מהחיסכון).
+        
+        תנאי סף:
+        - מעל 1% מהפקדה זה גבוה.
+        - מעל 0.145% מצבירה זה גבוה.
+        
+        החזר תשובה בעברית ברורה: האם דמי הניהול גבוהים, סבירים או מעולים, ופרט את האחוזים שמצאת בטקסט.
+        
+        הטקסט לניתוח:
+        {full_text}
+        """
+        
+        # שים לב: כאן אנחנו שולחים רק טקסט (String), לא קבצים!
+        response = model.generate_content(prompt)
         
         st.success("תוצאת הבדיקה:")
         st.write(response.text)
