@@ -15,28 +15,23 @@ try:
     genai.configure(api_key=API_KEY)
 except Exception as e:
     st.error("⚠️ שגיאה: מפתח ה-API לא נמצא בכספת (Secrets).")
-    st.info("וודא שהוספת את המפתח GEMINI_API_KEY ב-Streamlit Secrets")
     st.stop()
 
-# כותרת ומידע
 st.title("🔍 בודק דמי ניהול אוטומטי")
-st.write("העלה דוח פנסיוני בפורמט PDF לניתוח מהיר של דמי הניהול")
+st.write("העלה דוח פנסיוני בפורמט PDF לניתוח מהיר")
 
 with st.expander("ℹ️ מה הסטנדרטים?"):
     st.write("""
     **דמי ניהול תקינים:**
     - 🏦 מהפקדה: עד 1.0%
     - 💰 על צבירה: עד 0.145% בשנה
-    
-    דמי ניהול גבוהים יכולים לשחוק עשרות אלפי שקלים מהפנסיה לאורך שנים!
     """)
 
-# העלאת קובץ
 file = st.file_uploader("📄 בחר קובץ PDF", type=['pdf'])
 
 @st.cache_data
 def extract_pdf_text(pdf_file):
-    """חילוץ טקסט מ-PDF עם cache"""
+    """חילוץ טקסט מ-PDF"""
     reader = pypdf.PdfReader(pdf_file)
     full_text = ""
     for page in reader.pages:
@@ -45,35 +40,63 @@ def extract_pdf_text(pdf_file):
             full_text += t + "\n"
     return full_text
 
+def get_available_model():
+    """בוחר מודל זמין - מנסה כמה אופציות"""
+    model_options = [
+        'gemini-1.5-flash',
+        'models/gemini-1.5-flash',
+        'gemini-pro',
+        'models/gemini-pro'
+    ]
+    
+    for model_name in model_options:
+        try:
+            model = genai.GenerativeModel(model_name)
+            st.success(f"✅ משתמש במודל: {model_name}")
+            return model
+        except Exception as e:
+            continue
+    
+    # אם אף מודל לא עובד - נראה מה זמין
+    st.error("❌ לא נמצא מודל זמין")
+    try:
+        available = [m.name for m in genai.list_models()]
+        st.write("מודלים זמינים:", available)
+    except:
+        pass
+    return None
+
 def analyze_with_gemini(text):
-    """ניתוח הטקסט עם Gemini"""
-    model = genai.GenerativeModel('gemini-1.5-flash-latest')
+    """ניתוח עם Gemini"""
+    model = get_available_model()
+    
+    if not model:
+        raise Exception("לא נמצא מודל Gemini זמין")
     
     prompt = f"""אתה מומחה לניתוח דוחות פנסיה ישראליים.
 
-נתח את הדוח הבא וחלץ בדיוק:
-1. **דמי ניהול מהפקדה** (באחוזים) - חפש ביטויים כמו "דמי ניהול מהפקדה", "עמלת הפקדה"
-2. **דמי ניהול על צבירה** (באחוזים שנתיים) - חפש ביטויים כמו "דמי ניהול על צבירה", "עמלה שנתית"
+נתח את הדוח הבא וחלץ:
+1. **דמי ניהול מהפקדה** (באחוזים)
+2. **דמי ניהול על צבירה** (באחוזים שנתיים)
 
-**סטנדרטים לבדיקה:**
-- דמי ניהול מהפקדה: מעל 1.0% = גבוה
-- דמי ניהול על צבירה: מעל 0.145% = גבוה
+**סטנדרטים:**
+- מהפקדה: מעל 1.0% = גבוה
+- על צבירה: מעל 0.145% = גבוה
 
-**פורמט התשובה (חובה):**
+**פורמט תשובה:**
 
-### 📊 התוצאות שמצאתי:
-- דמי ניהול מהפקדה: [X]%
-- דמי ניהול על צבירה: [Y]%
+### 📊 התוצאות:
+- דמי ניהול מהפקדה: X%
+- דמי ניהול על צבירה: Y%
 
 ### ⚖️ הערכה:
-[האם הדמי הניהול גבוהים/סבירים/נמוכים ביחס לסטנדרט]
+[גבוה/סביר/נמוך]
 
 ### 💡 המלצה:
-[המלצה קצרה - 1-2 משפטים]
+[1-2 משפטים]
 
 ---
-
-**טקסט הדוח:**
+**טקסט:**
 {text[:15000]}"""
     
     response = model.generate_content(prompt)
@@ -81,31 +104,21 @@ def analyze_with_gemini(text):
 
 if file:
     try:
-        with st.spinner("🔄 מנתח את הדוח... אנא המתן"):
+        with st.spinner("🔄 מנתח דוח..."):
             # חילוץ טקסט
             full_text = extract_pdf_text(file)
             
-            # בדיקת תקינות
             if not full_text or len(full_text.strip()) < 50:
-                st.error("❌ לא הצלחתי לקרוא טקסט מהקובץ.")
-                st.warning("""
-                **סיבות אפשריות:**
-                - הקובץ מוצפן או מוגן
-                - הקובץ הוא תמונה סרוקה (לא PDF טקסטואלי)
-                - הקובץ פגום
-                
-                💡 נסה להמיר את הקובץ או להוריד מחדש מהבנק/חברת הפנסיה
-                """)
+                st.error("❌ לא הצלחתי לקרוא טקסט מהקובץ")
+                st.warning("ייתכן שהקובץ מוצפן, סרוק או פגום")
                 st.stop()
             
-            # ניתוח עם Gemini
+            # ניתוח
             analysis = analyze_with_gemini(full_text)
             
-            # הצגת תוצאות
             st.success("✅ הניתוח הושלם!")
             st.markdown(analysis)
             
-            # כפתור להורדת התוצאות
             st.download_button(
                 label="📥 הורד תוצאות",
                 data=analysis,
@@ -116,23 +129,24 @@ if file:
     except Exception as e:
         error_msg = str(e)
         
-        # טיפול חכם בשגיאות
         if "404" in error_msg:
             st.error("❌ שגיאת 404: המודל לא נמצא")
-            st.info("בדוק את שם המודל או את תקינות מפתח ה-API")
+            st.info("""
+            **פתרונות אפשריים:**
+            1. עדכן את google-generativeai לגרסה 0.8.3 ומעלה
+            2. בדוק שמפתח ה-API תקף
+            3. נסה מודל אחר (gemini-pro במקום gemini-1.5-flash)
+            """)
         elif "quota" in error_msg.lower() or "resource" in error_msg.lower():
-            st.error("❌ חריגה מהמכסה היומית של Gemini API")
-            st.info("המתן מספר דקות או השתמש במפתח API אחר")
+            st.error("❌ חריגה מהמכסה היומית")
+            st.info("נסה שוב מאוחר יותר או שדרג את חשבון ה-API")
         elif "api" in error_msg.lower():
             st.error(f"❌ שגיאת API: {error_msg}")
-            st.info("ייתכן שהמפתח אינו תקף או שהשירות אינו זמין כרגע")
         else:
-            st.error(f"❌ אירעה שגיאה: {error_msg}")
-            
-        # הצגת פרטים טכניים במצב debug
-        with st.expander("🔧 פרטים טכניים (למפתחים)"):
+            st.error(f"❌ שגיאה: {error_msg}")
+        
+        with st.expander("🔧 פרטים טכניים"):
             st.code(error_msg)
 
-# כותרת תחתונה
 st.markdown("---")
-st.caption("🏦 פותח על ידי pensya.info | שימו לב: זהו כלי עזר בלבד ואינו מהווה ייעוץ פנסיוני")
+st.caption("🏦 pensya.info | כלי עזר בלבד, לא ייעוץ פנסיוני")
