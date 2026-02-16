@@ -2,53 +2,46 @@ import streamlit as st
 import google.generativeai as genai
 import pypdf
 
-# --- הגדרת המפתח שלך ---
+# הגדרת המפתח (וודא שהעתקת אותו במדויק)
 API_KEY = "AIzaSyBrvKibfRFWjnmSm4LTFHtaqLEoZZVcrgU"
 genai.configure(api_key=API_KEY)
 
 st.set_page_config(page_title="בודק הפנסיה - pensya.info", layout="centered")
 st.title("🔍 בודק דמי ניהול אוטומטי")
-st.write("העלה דוח שנתי או רבעוני (PDF)")
+st.write("העלה דוח פנסיוני בפורמט PDF")
 
 file = st.file_uploader("בחר קובץ PDF", type=['pdf'])
 
 if file:
     st.info("מנתח נתונים, אנא המתן...")
     try:
-        # 1. חילוץ טקסט עצמאי מה-PDF
+        # 1. חילוץ טקסט מה-PDF (כדי לא לשלוח קובץ לגוגל ולמנוע שגיאות 404)
         reader = pypdf.PdfReader(file)
         full_text = ""
         for page in reader.pages:
-            content = page.extract_text()
-            if content:
-                full_text += content
+            t = page.extract_text()
+            if t: full_text += t
         
-        if not full_text.strip():
-            st.error("לא הצלחתי לקרוא טקסט מהקובץ. נסה להעלות צילום מסך במקום.")
+        if len(full_text) < 50:
+            st.error("הקובץ נראה סרוק כתמונה או ריק. נסה להעלות דוח דיגיטלי.")
         else:
-            # 2. שליחת הטקסט כהודעה פשוטה (String) למודל
-            model = genai.GenerativeModel('gemini-1.5-flash')
+            # 2. שימוש במודל היציב ביותר
+            model = genai.GenerativeModel(model_name='gemini-1.5-flash')
             
             prompt = f"""
-            משימה: מצא את דמי הניהול בטקסט המצורף מהדוח הפנסיוני.
+            נתח את דמי הניהול בטקסט הבא:
+            - דמי ניהול מהפקדה (תקרה: 1%)
+            - דמי ניהול מצבירה (תקרה: 0.145%)
             
-            תנאי סף לבדיקה:
-            - דמי ניהול מהפקדה: מעל 1% זה גבוה.
-            - דמי ניהול מצבירה: מעל 0.145% זה גבוה.
+            החזר תשובה בעברית: האם דמי הניהול גבוהים, סבירים או מעולים, ומהם האחוזים שמצאת?
             
-            החזר תשובה בעברית הכוללת:
-            1. האם דמי הניהול 'גבוהים', 'סבירים' או 'מעולים'.
-            2. האחוזים המדויקים שמצאת בדו"ח.
-            
-            הטקסט לניתוח:
-            {full_text}
+            הטקסט:
+            {full_text[:10000]}  # שולחים רק את ההתחלה כדי לא להעמיס
             """
             
-            # פקודה זו שולחת טקסט בלבד, ולכן לא תייצר שגיאת 404 של קבצים
             response = model.generate_content(prompt)
-            
             st.success("תוצאת הבדיקה:")
             st.write(response.text)
             
     except Exception as e:
-        st.error(f"אירעה שגיאה: {e}")
+        st.error(f"שגיאה: {e}")
