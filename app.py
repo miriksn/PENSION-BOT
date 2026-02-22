@@ -38,7 +38,7 @@ MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
 MAX_TEXT_CHARS = 15_000
 MAX_PAGES = 3
 RATE_LIMIT_MAX = 5
-RATE_LIMIT_WINDOW_SEC = 3600  # שעה אחת
+RATE_LIMIT_WINDOW_SEC = 3600
 
 # ─── אבטחה: משיכת המפתח ────────────────────────────────────
 try:
@@ -84,16 +84,34 @@ def _check_rate_limit() -> tuple[bool, str]:
     return True, ""
 
 
+# ─── חילוץ טקסט מ-PDF (layout mode) ───────────────────────
+def extract_pdf_text(pdf_bytes: bytes) -> str:
+    """
+    חולץ טקסט תוך שימוש ב-extraction_mode='layout' כברירת מחדל.
+    מצב זה מייצר טקסט קריא ונכון גם עבור PDF-ים עם עמודות ו-RTL עברי.
+    נפול בחזרה ל-plain אם layout נכשל.
+    """
+    reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
+    full_text = ""
+    for page in reader.pages:
+        try:
+            t = page.extract_text(extraction_mode="layout")
+        except Exception:
+            t = page.extract_text()
+        if t:
+            full_text += t + "\n"
+    return full_text
+
+
 # ─── בדיקה האם PDF וקטורי (לא סרוק) ──────────────────────
 def is_vector_pdf(pdf_bytes: bytes) -> bool:
+    """
+    בודק האם ה-PDF מכיל טקסט וקטורי אמיתי.
+    משתמש ב-layout mode לקבלת תוצאה אמינה.
+    """
     try:
-        reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
-        total_text = ""
-        for page in reader.pages:
-            t = page.extract_text()
-            if t:
-                total_text += t
-        return len(total_text.strip()) >= 100
+        text = extract_pdf_text(pdf_bytes)
+        return len(text.strip()) >= 100
     except Exception:
         return False
 
@@ -180,7 +198,6 @@ def build_prompt_messages(text: str, gender: str, employment: str, family_status
 
 
 def format_analysis(parsed: dict) -> str:
-    """הופך את תשובת ה-JSON לפורמט Markdown קריא."""
     deposit = parsed.get("deposit_fee")
     accum = parsed.get("accumulation_fee")
     deposit_status = parsed.get("deposit_status", "unknown")
@@ -199,17 +216,6 @@ def format_analysis(parsed: dict) -> str:
         f"{'דמי ניהול גבוהים מהסטנדרט.' if 'high' in [deposit_status, accum_status] else 'דמי ניהול תקינים.'}\n\n"
         f"### 💡 המלצה:\n{recommendation}"
     )
-
-
-# ─── חילוץ טקסט מ-PDF ──────────────────────────────────────
-def extract_pdf_text(pdf_bytes: bytes) -> str:
-    reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
-    full_text = ""
-    for page in reader.pages:
-        t = page.extract_text()
-        if t:
-            full_text += t + "\n"
-    return full_text
 
 
 # ─── ניתוח עם OpenAI ───────────────────────────────────────
@@ -265,7 +271,6 @@ with st.expander("🔒 פרטיות ואבטחה"):
 st.markdown("---")
 st.subheader("📋 כמה שאלות לפני שנתחיל")
 
-# ─── שאלה 1: מגדר ──────────────────────────────────────────
 gender = st.radio(
     "מה המגדר שלך?",
     options=["גבר", "אישה"],
@@ -274,7 +279,6 @@ gender = st.radio(
     key="gender"
 )
 
-# ─── שאלה 2: סטטוס תעסוקתי ─────────────────────────────────
 employment = st.radio(
     "מה היה מעמדך התעסוקתי במהלך תקופת הדוח?",
     options=["שכיר", "עצמאי", "שכיר + עצמאי"],
@@ -283,7 +287,6 @@ employment = st.radio(
     key="employment"
 )
 
-# ─── שאלה 3: מצב משפחתי ────────────────────────────────────
 family_status = st.radio(
     "מה מצבך המשפחתי?",
     options=["רווק/ה", "נשוי/אה", "לא נשוי/אה אך יש ילדים"],
@@ -292,7 +295,6 @@ family_status = st.radio(
     key="family_status"
 )
 
-# ─── הצג כפתור העלאה רק לאחר מענה על כל השאלות ─────────────
 all_answered = gender is not None and employment is not None and family_status is not None
 
 if not all_answered:
@@ -307,13 +309,11 @@ file = st.file_uploader("בחר קובץ PDF", type=["pdf"])
 
 # ─── לוגיקה ראשית ──────────────────────────────────────────
 if file:
-    # Rate limiting
     allowed, rate_error = _check_rate_limit()
     if not allowed:
         st.error(rate_error)
         st.stop()
 
-    # ולידציה
     is_valid, result = validate_file(file)
     if not is_valid:
         st.error(result)
@@ -344,7 +344,7 @@ if file:
                 del pdf_bytes
                 st.stop()
 
-            # ─── שלב 3: חילוץ טקסט ─────────────────────────
+            # ─── שלב 3: חילוץ טקסט (layout mode) ──────────
             full_text = extract_pdf_text(pdf_bytes)
             del pdf_bytes
             gc.collect()
@@ -357,10 +357,7 @@ if file:
                 )
                 st.stop()
 
-            st.info(f"📄 חולץ טקסט: {len(full_text)} תווים")
-
             # ─── שלב 4: זיהוי סוג המוצר לפי מילות מפתח ────
-            # הבדיקה על הטקסט המלא לפני אנונימיזציה וקיצוץ
             if not is_comprehensive_pension(full_text):
                 st.warning(
                     "⚠️ הדוח שהעלית אינו דוח של קרן פנסיה מקיפה.\n\n"
