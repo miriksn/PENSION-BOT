@@ -123,9 +123,10 @@ def process_pdf_vision(client, pdf_bytes):
         temperature=0 # חסימת "יצירתיות" של המודל
     )
     
+    # התיקון שהוספנו: ניגשים לאיבר הראשון ברשימת התשובות 
     parsed_data = response.choices.message.parsed
     
-    # 4. המרה חזרה למבנה ה-JSON (לצורך תאימות מלאה לקוד התצוגה שלך)
+    # 4. המרה חזרה למבנה ה-JSON (לצורך תאימות מלאה לקוד התצוגה)
     data = {
         "table_a": {"rows": [{"תיאור": r.description, "סכום בש\"ח": r.amount} for r in parsed_data.table_a]},
         "table_b": {"rows": [{"תיאור": r.description, "סכום בש\"ח": r.amount} for r in parsed_data.table_b]},
