@@ -3,6 +3,7 @@ import fitz
 import json
 import os
 import io
+import zipfile
 import pandas as pd
 import re
 from openai import OpenAI
@@ -204,25 +205,25 @@ def display_pension_table(rows, title, col_order):
     st.table(df)
 
 
-def build_excel(all_tables):
-    """Build an Excel file with one sheet per table. Returns bytes.
-    Tries openpyxl first, falls back to xlsxwriter if not installed."""
-    output = io.BytesIO()
-    try:
-        engine = "openpyxl"
-        import openpyxl  # noqa: F401
-    except ImportError:
-        engine = "xlsxwriter"
-    with pd.ExcelWriter(output, engine=engine) as writer:
+def build_zip_csv(all_tables):
+    """
+    Build a ZIP archive containing one UTF-8 CSV per table.
+    Uses only Python stdlib — no openpyxl / xlsxwriter needed.
+    Returns bytes ready for st.download_button.
+    """
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
         for sheet_name, rows, col_order in all_tables:
             if not rows:
                 continue
             df = pd.DataFrame(rows)
             existing = [c for c in col_order if c in df.columns]
             df = df[existing]
-            df.to_excel(writer, sheet_name=sheet_name, index=False)
-    output.seek(0)
-    return output.read()
+            # BOM so Excel opens Hebrew CSVs correctly
+            csv_bytes = ("﻿" + df.to_csv(index=False)).encode("utf-8")
+            zf.writestr(f"{sheet_name}.csv", csv_bytes)
+    zip_buf.seek(0)
+    return zip_buf.read()
 
 
 # ─────────────────────────────────────────────
@@ -330,10 +331,10 @@ else:
                 ("ד-מסלולי_השקעה",    data.get("table_d", {}).get("rows", []), col_d),
                 ("ה-פירוט_הפקדות",    data.get("table_e", {}).get("rows", []), col_e),
             ]
-            excel_bytes = build_excel(all_tables)
+            zip_bytes = build_zip_csv(all_tables)
             st.download_button(
-                label="📥 הורד את כל הטבלאות (Excel)",
-                data=excel_bytes,
-                file_name="pension_report.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                label="📥 הורד את כל הטבלאות (ZIP / CSV)",
+                data=zip_bytes,
+                file_name="pension_report.zip",
+                mime="application/zip"
             )
