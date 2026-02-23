@@ -476,14 +476,37 @@ def extract_table_d_by_coordinates(pdf_bytes: bytes) -> list[dict]:
                 words = page.get_text("words")  # (x0,y0,x1,y1,word,block,line,word_no)
 
                 # מצא y של תחילת וסוף סעיף ד'
+                # חשוב: get_text("words") מחזיר מילה בודדת ב-w[4] — לא ביטוי שלם.
+                # לכן מחפשים "מסלולי" ו-"השקעה" כמילים נפרדות בשורה קרובה.
                 start_y, end_y = None, None
-                for w in words:
-                    if section_kw in w[4] and start_y is None:
-                        start_y = w[1]
-                    if start_y and any(ek in w[4] for ek in end_kws) and w[1] > start_y:
-                        if end_y is None or w[1] < end_y:
-                            end_y = w[1]
 
+                # בנה מילון y -> רשימת מילים לאיתור ביטויים מרובי מילים
+                y_to_words: dict[float, list[str]] = {}
+                for w in words:
+                    y_r = round(w[1], 0)
+                    y_to_words.setdefault(y_r, []).append(w[4])
+
+                for y_r, wtokens in sorted(y_to_words.items()):
+                    line_str = " ".join(wtokens)
+                    # תחילת סעיף ד': שורה שמכילה "מסלולי" ו"השקעה"
+                    if start_y is None and "מסלולי" in line_str and "השקעה" in line_str:
+                        start_y = y_r
+                        continue
+                    # סוף סעיף ד': שורה שמכילה אחת ממילות הסיום
+                    if start_y is not None:
+                        for ek in end_kws:
+                            ek_words = ek.split()
+                            if all(ew in line_str for ew in ek_words):
+                                if end_y is None or y_r < end_y:
+                                    end_y = y_r
+                                break
+
+                if start_y is None:
+                    # Fallback: אם לא נמצאה כותרת — חפש ישירות מילות "מסלול" בכל העמוד
+                    for w in words:
+                        if "מסלול" in w[4] and not any(sk in w[4] for sk in ("השקעה","תשואות")):
+                            start_y = w[1] - 5
+                            break
                 if start_y is None:
                     continue
 
@@ -512,14 +535,24 @@ def extract_table_d_by_coordinates(pdf_bytes: bytes) -> list[dict]:
                         continue  # שורת כותרת
 
                     # חלץ: טוקנים מספריים = אחוז, השאר = שם מסלול
+                    # PyMuPDF לפעמים מפריד "0.17" ו-"%" לשני טוקנים נפרדים
                     pct_tokens  = []
                     name_tokens = []
-                    for tok in tokens:
+                    ti = 0
+                    while ti < len(tokens):
+                        tok = tokens[ti]
                         clean = tok.replace(",", ".").rstrip("%")
-                        if num_re.match(tok) or (re.match(r"^-?\d+[.,]\d+$", clean)):
+                        is_num = bool(re.match(r"^-?\d+[.,]\d+$", clean))
+                        if is_num:
                             pct_tokens.append(clean)
+                            # דלג על "%" שמגיע בטוקן נפרד מיד אחרי המספר
+                            if ti + 1 < len(tokens) and tokens[ti + 1].strip() == "%":
+                                ti += 1
+                        elif tok.strip() == "%":
+                            pass  # % בודד שכבר טופל
                         else:
                             name_tokens.append(tok)
+                        ti += 1
 
                     percentage = pct_tokens[0] if pct_tokens else None
 
@@ -727,6 +760,13 @@ if uploaded_file:
 
     # ── Table D: חילוץ לפי קואורדינטות X,Y — לא GPT, לא Regex על טקסט גולמי ──
     coord_rows_d = extract_table_d_by_coordinates(pdf_bytes)
+
+    with st.expander("🔬 Debug טבלה ד' — תוצאות חילוץ קואורדינטות", expanded=True):
+        if coord_rows_d:
+            st.success(f"נמצאו {len(coord_rows_d)} שורות")
+            st.json(coord_rows_d)
+        else:
+            st.error("לא נמצאו שורות — בדוק את ה-debug של הטקסט הגולמי למטה")
 
     if coord_rows_d:
         dfs["table_d"] = build_table_d(coord_rows_d)
