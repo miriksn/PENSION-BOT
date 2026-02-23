@@ -6,7 +6,7 @@ import pandas as pd
 from openai import OpenAI
 
 # הגדרות תצוגה
-st.set_page_config(page_title="מנתח פנסיה - סינון הפקדות מאוחרות", layout="wide")
+st.set_page_config(page_title="מנתח פנסיה - גרסת אפס פשרות", layout="wide")
 
 st.markdown("""
 <style>
@@ -36,37 +36,36 @@ def display_pension_table(rows, title):
     st.subheader(title)
     st.table(df)
 
-def process_with_filtering(client, text):
-    prompt = f"""Extract ALL tables from the pension report.
+def process_no_compromise(client, text):
+    prompt = f"""You are a top-tier forensic auditor. Extract EVERY table and EVERY row from this pension report. 
     
-    STRICT FILTERING RULE FOR TABLE E:
-    - If the report contains a section titled "פירוט הפקדות בגין שנת XXXX שהופקדו לאחר תום השנה" (Deposits after year end) or similar headers for future-dated deposits, DO NOT extract or include these rows.
-    - Ignore those rows completely as they are irrelevant to the user.
-    - Extract ONLY the main deposit rows belonging to the actual reporting year.
+    MANDATORY - DO NOT SKIP:
+    1. TABLE A (Estimates): Extract all rows (e.g., 5,223, 10,888, etc.).
+    2. TABLE B (Movements): Extract all rows (Opening, Deposits, Profits, Fees, Insurance, etc.).
+    3. TABLE C (Fees): Extract ALL personal fees including investment expenses (הוצאות ניהול השקעות).
+    4. TABLE D (Tracks): Extract the FULL track name and its return.
     
-    CRITICAL FOR TABLE E STRUCTURE:
-    - The table may span multiple pages. Extract every relevant row.
-    - The LAST row in your JSON must be the "סה"כ" (Total) row. 
-    - You MUST calculate and include the sum of the 'שכר' (Salary) column for this last row.
-    - Ensure 'עובד' (Employee) totals are in the 'עובד' column, not 'שכר'.
+    STRICT RULES FOR TABLE E (DEPOSITS):
+    - DO NOT AGGREGATE. Every single row from the PDF must be a separate entry in the JSON. Even small amounts (39, 34, 478, etc.) must appear exactly as shown.
+    - FILTERING: If a section is titled 'פירוט הפקדות בגין שנת XXXX שהופקדו לאחר תום השנה' or similar, DO NOT include rows from that section. Extract ONLY deposits belonging to the reporting period.
+    - TOTAL ROW: The last row must be 'סה"כ'. Calculate the sum of the 'שכר' column for this row based ONLY on the non-filtered rows.
+    - Columns: מועד | חודש | שכר | עובד | מעסיק | פיצויים | סה"כ.
 
     JSON STRUCTURE:
     {{
       "report_info": {{"קרן": "", "עמית": ""}},
-      "table_a": {{"rows": []}},
-      "table_b": {{"rows": []}},
-      "table_c": {{"rows": []}},
-      "table_d": {{"rows": []}},
-      "table_e": {{"rows": [
-          {{ "מועד": "", "חודש": "", "שכר": "", "עובד": "", "מעסיק": "", "פיצויים": "", "סה\"כ": "" }}
-      ]}}
+      "table_a": {{"rows": [{{"תיאור": "", "סכום": ""}}]}},
+      "table_b": {{"rows": [{{"תיאור": "", "סכום": ""}}]}},
+      "table_c": {{"rows": [{{"תיאור": "", "אחוז": ""}}]}},
+      "table_d": {{"rows": [{{"מסלול": "", "תשואה": ""}}]}},
+      "table_e": {{"rows": [{{ "מועד": "", "חודש": "", "שכר": "", "עובד": "", "מעסיק": "", "פיצויים": "", "סה\"כ": "" }}]}}
     }}
     REPORT TEXT:
     {text}"""
     
     res = client.chat.completions.create(
         model="gpt-4o",
-        messages=[{"role": "system", "content": "You are a precise financial auditor. Ignore deposits made after the year end."},
+        messages=[{"role": "system", "content": "You are a meticulous data extraction engine. You extract every row exactly as printed. No summaries."},
                   {"role": "user", "content": prompt}],
         temperature=0,
         response_format={"type": "json_object"}
@@ -74,18 +73,18 @@ def process_with_filtering(client, text):
     return json.loads(res.choices[0].message.content)
 
 # ממשק
-st.title("📋 חילוץ נתונים פנסיוני (עם סינון הפקדות מאוחרות)")
+st.title("📋 חילוץ נתונים פנסיוני (גרסת אפס פשרות)")
 client = init_client()
 
 if client:
     file = st.file_uploader("העלה דוח PDF", type="pdf")
     if file:
-        with st.spinner("מנתח ומסנן נתונים..."):
+        with st.spinner("מבצע חילוץ מלא של כל השורות..."):
             full_text = get_full_pdf_text(file)
-            data = process_with_filtering(client, full_text)
+            data = process_no_compromise(client, full_text)
             
             if data:
-                st.markdown('<div class="status-msg">✅ הנתונים חולצו. הפקדות לאחר תום השנה סוננו החוצה.</div>', unsafe_allow_html=True)
+                st.markdown('<div class="status-msg">✅ הנתונים חולצו במלואם.</div>', unsafe_allow_html=True)
                 
                 # תצוגת טבלאות
                 display_pension_table(data.get("table_a", {}).get("rows"), "א. תשלומים צפויים")
@@ -97,8 +96,8 @@ if client:
                 # כפתור הורדה
                 st.markdown("---")
                 st.download_button(
-                    label="📥 הורד נתונים מסוננים (JSON)",
+                    label="📥 הורד נתונים כקובץ JSON",
                     data=json.dumps(data, indent=2, ensure_ascii=False),
-                    file_name="pension_filtered_data.json",
+                    file_name="pension_audit_data.json",
                     mime="application/json"
                 )
