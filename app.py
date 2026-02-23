@@ -198,18 +198,12 @@ def call_openai(raw_text: str, openai_client: openai.OpenAI) -> dict:
     'מסלולי השקעה' section header — eliminating any chance of
     confusing returns (ד) with management fees (ג).
     """
-    section_d_text = extract_section(raw_text, "מסלולי השקעה")
-
     user_message = (
         "Here is the raw text extracted from the pension PDF.\n"
-        "Extract the five tables according to your instructions.\n\n"
-        "=== FULL PDF TEXT ===\n"
-        f"{raw_text[:110_000]}\n\n"
-        "=== ISOLATED SECTION ד (מסלולי השקעה ותשואות) — USE THIS FOR table_d ONLY ===\n"
-        "The text below is ONLY the investment tracks section. "
-        "Extract table_d exclusively from this text — ignore any percentages "
-        "from the full text above when filling table_d.\n"
-        f"{section_d_text}"
+        "Extract tables a, b, c, and e according to your instructions.\n"
+        "NOTE: table_d will be extracted separately by a coordinate-based algorithm — "
+        "you still need to return a table_d key in your JSON but it can be an empty array.\n\n"
+        f"{raw_text[:120_000]}"
     )
 
     response = openai_client.chat.completions.create(
@@ -452,68 +446,109 @@ def build_table_c(rows: list[dict]) -> pd.DataFrame:
     df["percentage"] = df["percentage"].apply(clean_num)
     return df
 
-def extract_table_d_with_regex(section_text: str) -> list[dict]:
+def extract_table_d_by_coordinates(pdf_bytes: bytes) -> list[dict]:
     """
-    חילוץ טבלה ד' ישירות עם Regex מהקטע המבודד של "מסלולי השקעה".
-    לא מסתמך על GPT-4o לקרוא את המספר — מחפש שם מסלול ואחריו אחוז.
+    חילוץ טבלה ד' לפי קואורדינטות X,Y של מילות טקסט (PyMuPDF "words" mode).
 
-    דפוסים נפוצים בדוחות:
-        מסלול כלל פנסיה לבני 50 ומטה   0.17%
-        מסלול אג"ח ממשלתי               -1.23%
-        מסלול מניות                      12.50%
+    למה לא regex על טקסט גולמי:
+      PDF עברי RTL ממזג עמודות לשורה אחת — "מסלול כלל פנסיה  0.17%"
+      הופך ל-"1.0מסלול כלל פנסיה לבני 0 5 ומטה" ללא סימן אחוז.
+
+    הפתרון: page.get_text("words") מחזיר כל מילה עם (x0,y0,x1,y1).
+    נקבץ מילים לשורות לפי y0, ובכל שורה שמכילה "מסלול" נחפש טוקן מספרי.
     """
     rows = []
-    lines = section_text.splitlines()
+    track_kw   = "מסלול"
+    section_kw = "מסלולי השקעה"
+    skip_kw    = ("השקעה", "תשואות")
+    end_kws    = ("פירוט הפקדות", "פרטי סוכן", "תנועות בקרן")
+    Y_TOL      = 4   # פיקסלים — סף לאיחוד מילים לאותה שורה
 
-    # Regex: מחפש שורה עם שם מסלול (מכיל "מסלול") ואחוז — גם אם הם על שורה אחת
-    # וגם מטפל במקרה שהאחוז על שורה נפרדת אחרי שם המסלול
-    pct_pattern = re.compile(r"(-?\d+\.\d+)\s*%")
-    track_pattern = re.compile(r"מסלול[יי]?")
-    # שורת כותרת — לא שם מסלול (מכילה "השקעה" או "תשואות")
-    header_pattern = re.compile(r"השקעה|תשואות")
+    num_re = re.compile(r"^-?\d+[.,]\d+%?$")
 
-    i = 0
-    while i < len(lines):
-        line = lines[i].strip()
+    try:
+        with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
+            for page in doc:
+                page_text = page.get_text("text")
+                if section_kw not in page_text:
+                    continue
 
-        if track_pattern.search(line) and not header_pattern.search(line):
-            # נסה למצוא אחוז באותה שורה
-            pct_match = pct_pattern.search(line)
+                words = page.get_text("words")  # (x0,y0,x1,y1,word,block,line,word_no)
 
-            if pct_match:
-                # שם המסלול הוא הטקסט ללא האחוז
-                track_name = pct_pattern.sub("", line).replace("%", "").strip()
-                rows.append({
-                    "track_name": track_name,
-                    "return_percentage": pct_match.group(1),
-                })
-            else:
-                # האחוז אולי בשורה הבאה — בדוק עד 3 שורות קדימה
-                track_name_parts = [line]
-                found = False
-                for j in range(1, 4):
-                    if i + j >= len(lines):
-                        break
-                    next_line = lines[i + j].strip()
-                    pct_match = pct_pattern.search(next_line)
-                    if pct_match:
-                        full_name = " ".join(track_name_parts).strip()
+                # מצא y של תחילת וסוף סעיף ד'
+                start_y, end_y = None, None
+                for w in words:
+                    if section_kw in w[4] and start_y is None:
+                        start_y = w[1]
+                    if start_y and any(ek in w[4] for ek in end_kws) and w[1] > start_y:
+                        if end_y is None or w[1] < end_y:
+                            end_y = w[1]
+
+                if start_y is None:
+                    continue
+
+                # סנן מילים לסעיף ד' בלבד
+                sec_words = [
+                    w for w in words
+                    if w[1] >= start_y and (end_y is None or w[1] < end_y)
+                ]
+
+                # קבץ מילים לשורות לפי y0
+                lines: dict[float, list] = {}
+                for w in sec_words:
+                    y = round(w[1], 0)
+                    matched = next((k for k in lines if abs(k - y) <= Y_TOL), None)
+                    key = matched if matched is not None else y
+                    lines.setdefault(key, []).append(w)
+
+                # עבור כל שורה ממוינת — מצא שורות מסלול
+                for y_key in sorted(lines):
+                    tokens = [w[4] for w in sorted(lines[y_key], key=lambda w: w[0])]
+                    full   = " ".join(tokens)
+
+                    if track_kw not in full:
+                        continue
+                    if any(sk in full for sk in skip_kw):
+                        continue  # שורת כותרת
+
+                    # חלץ: טוקנים מספריים = אחוז, השאר = שם מסלול
+                    pct_tokens  = []
+                    name_tokens = []
+                    for tok in tokens:
+                        clean = tok.replace(",", ".").rstrip("%")
+                        if num_re.match(tok) or (re.match(r"^-?\d+[.,]\d+$", clean)):
+                            pct_tokens.append(clean)
+                        else:
+                            name_tokens.append(tok)
+
+                    percentage = pct_tokens[0] if pct_tokens else None
+
+                    # אם לא נמצא אחוז — חפש בשורות הקרובות (y גדול יותר)
+                    if percentage is None:
+                        sorted_ys = sorted(lines.keys())
+                        try:
+                            cur_i = sorted_ys.index(y_key)
+                        except ValueError:
+                            cur_i = -1
+                        for ny in sorted_ys[cur_i + 1: cur_i + 5]:
+                            next_toks = [w[4] for w in sorted(lines[ny], key=lambda w: w[0])]
+                            for tok in next_toks:
+                                clean = tok.replace(",", ".").rstrip("%")
+                                if num_re.match(tok) or re.match(r"^-?\d+[.,]\d+$", clean):
+                                    percentage = clean
+                                    break
+                            if percentage:
+                                break
+
+                    track_name = " ".join(t for t in name_tokens if t.strip()).strip()
+                    if track_name:
                         rows.append({
-                            "track_name": full_name,
-                            "return_percentage": pct_match.group(1),
+                            "track_name": track_name,
+                            "return_percentage": percentage,
                         })
-                        i += j  # דלג על השורות שכבר עיבדנו
-                        found = True
-                        break
-                    else:
-                        track_name_parts.append(next_line)
-                # אם לא נמצא אחוז — הוסף ללא אחוז
-                if not found:
-                    rows.append({
-                        "track_name": " ".join(track_name_parts).strip(),
-                        "return_percentage": None,
-                    })
-        i += 1
+
+    except Exception as exc:
+        st.warning(f"שגיאה בחילוץ טבלה ד' לפי קואורדינטות: {exc}")
 
     return rows
 
@@ -665,9 +700,10 @@ if uploaded_file:
         except Exception:
             st.stop()
 
-    with st.expander("📌 קטע 'מסלולי השקעה' שחולץ עם Regex (debug)", expanded=False):
+    with st.expander("📌 קטע 'מסלולי השקעה' מהטקסט הגולמי (debug)", expanded=False):
         _d_preview = extract_section(raw_text, "מסלולי השקעה")
-        st.text(_d_preview if _d_preview != raw_text else "⚠️ הכותרת 'מסלולי השקעה' לא נמצאה — נעשה שימוש בטקסט המלא")
+        st.caption("הטקסט הגולמי של סעיף ד' — שימו לב שהמספרים עלולים להיות מבולגנים בגלל RTL. לכן משתמשים בקואורדינטות X,Y ולא בטקסט הזה.")
+        st.text(_d_preview if _d_preview != raw_text else "⚠️ הכותרת 'מסלולי השקעה' לא נמצאה")
 
     with st.expander("🛠️ Raw JSON from GPT-4o (debug)", expanded=False):
         st.json(extracted)
@@ -689,18 +725,17 @@ if uploaded_file:
             st.warning(f"Could not build {key}: {exc}")
             dfs[key] = pd.DataFrame()
 
-    # ── Table D: חילוץ ישיר עם Regex — לא GPT ──
-    section_d_text = extract_section(raw_text, "מסלולי השקעה")
-    regex_rows_d = extract_table_d_with_regex(section_d_text)
+    # ── Table D: חילוץ לפי קואורדינטות X,Y — לא GPT, לא Regex על טקסט גולמי ──
+    coord_rows_d = extract_table_d_by_coordinates(pdf_bytes)
 
-    if regex_rows_d:
-        dfs["table_d"] = build_table_d(regex_rows_d)
-        st.success(f"✅ טבלה ד' חולצה עם Regex ישירות מסעיף 'מסלולי השקעה' ({len(regex_rows_d)} שורות)")
+    if coord_rows_d:
+        dfs["table_d"] = build_table_d(coord_rows_d)
+        st.success(f"✅ טבלה ד' חולצה לפי קואורדינטות ({len(coord_rows_d)} מסלולים)")
     else:
-        # fallback: השתמש בתוצאת GPT אם Regex לא מצא כלום
+        # fallback: GPT-4o אם החילוץ הגיאומטרי נכשל
         gpt_rows_d = extracted.get("table_d", [])
         dfs["table_d"] = build_table_d(gpt_rows_d) if gpt_rows_d else pd.DataFrame()
-        st.warning("⚠️ Regex לא מצא מסלולים בסעיף ד' — נעשה שימוש בתוצאת GPT-4o כ-fallback")
+        st.warning("⚠️ חילוץ לפי קואורדינטות לא מצא מסלולים — נעשה שימוש בתוצאת GPT-4o כ-fallback")
 
     # ── Step 4: Cross-validation ──
     st.markdown("---")
