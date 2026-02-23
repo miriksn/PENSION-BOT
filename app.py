@@ -70,10 +70,13 @@ def extract_table_d_python(raw_text):
     lines     = [l.strip() for l in raw_text.split('\n')]
     non_blank = [(i, l) for i, l in enumerate(lines) if l]
 
-    # ── Keywords that signal a NEW table section (not table D) ────────────
+    # ── Keywords that signal the section AFTER table D ────────────────────
+    # IMPORTANT: only sections that come AFTER table D in the report.
+    # Do NOT include "דמי ניהול" or "הוצאות" — table C sits beside table D
+    # on the page and fitz may interleave their lines, causing the search
+    # window to close before any data row is reached.
     OTHER_TABLE_HEADERS = re.compile(
-        r'פירוט.?הפקדות|תנועות.?בקרן|תשלומים.?צפויים|דמי.?ניהול|'
-        r'הוצאות|הרכב.?נכסים|שינויים.?בחשבון|יתרות|טבלה.?[אבגהו]'
+        r'פירוט.?הפקדות|פרטי.?סוכן|פרטי.?יועץ|ו\..{0,4}פרטי'
     )
 
     # ── Step 1: find table D header ───────────────────────────────────────
@@ -101,12 +104,19 @@ def extract_table_d_python(raw_text):
     window = [(i, l) for i, l in non_blank if header_idx < i < end_idx]
 
     rows = []
-    for _, line in window:
+    window_lines = [l for _, l in window]
+    for idx, line in enumerate(window_lines):
         if PCT.search(line) and HEBREW.search(line):
             pct_match  = PCT.search(line)
             return_val = pct_match.group(0).strip()
             # Track name = everything before the percentage on the same line
             track = line[:pct_match.start()].strip() or line[pct_match.end():].strip()
+            # If the NEXT line is plain Hebrew (no %) it is the continuation of the track name
+            # e.g. "מסלול כלל פנסיה 11.25%" followed by "לבני 50 ומטה"
+            if idx + 1 < len(window_lines):
+                next_line = window_lines[idx + 1].strip()
+                if next_line and HEBREW.search(next_line) and not PCT.search(next_line):
+                    track = (track + " " + next_line).strip()
             if track:
                 rows.append({"מסלול": track, "תשואה": return_val})
 
