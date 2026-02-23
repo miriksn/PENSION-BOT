@@ -1,3 +1,4 @@
+
 import streamlit as st
 import fitz
 import base64
@@ -123,10 +124,10 @@ def process_pdf_vision(client, pdf_bytes):
         temperature=0 # חסימת "יצירתיות" של המודל
     )
     
-    # התיקון שהוספנו: ניגשים לאיבר הראשון ברשימת התשובות 
+    # 4. חילוץ התשובה מהאיבר הראשון במערך התשובות (התיקון לשגיאה)
     parsed_data = response.choices.message.parsed
     
-    # 4. המרה חזרה למבנה ה-JSON (לצורך תאימות מלאה לקוד התצוגה)
+    # 5. המרה חזרה למבנה ה-JSON (לצורך תאימות מלאה לקוד התצוגה שלך)
     data = {
         "table_a": {"rows": [{"תיאור": r.description, "סכום בש\"ח": r.amount} for r in parsed_data.table_a]},
         "table_b": {"rows": [{"תיאור": r.description, "סכום בש\"ח": r.amount} for r in parsed_data.table_b]},
@@ -170,3 +171,4 @@ if client:
                 display_pension_table(data.get("table_e", {}).get("rows"), "ה. פירוט הפקדות", ["שם המעסיק", "מועד", "חודש", "שכר", "עובד", "מעסיק", "פיצויים", "סה\"כ"])
 else:
     st.error("לא נמצא מפתח OpenAI (OPENAI_API_KEY). אנא הגדר אותו.")
+```
