@@ -106,13 +106,49 @@ def validate_file(uploaded_file) -> tuple[bool, str]:
 
 # ─── אנונימיזציה ──────────────────────────────────────────
 def anonymize_pii(text: str) -> str:
-    text = re.sub(r"\b\d{7,9}\b", "[ID]", text)
-    text = re.sub(r"\b\d{10,12}\b", "[POLICY_NUMBER]", text)
+    # ת"ז ישראלית: 7-9 ספרות (לא כחלק מסכומים)
+    text = re.sub(r"(?<!\d)\d{7,9}(?!\d)", "[ID]", text)
+    # מספר פוליסה: 10-12 ספרות
+    text = re.sub(r"(?<!\d)\d{10,12}(?!\d)", "[POLICY_NUMBER]", text)
+    # תאריכים
     text = re.sub(r"\b\d{1,2}[/.\-]\d{1,2}[/.\-]\d{4}\b", "[DATE]", text)
+    # אימייל
     text = re.sub(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}", "[EMAIL]", text)
+    # טלפון
     text = re.sub(r"\b0\d{1,2}[-\s]?\d{7}\b", "[PHONE]", text)
-    text = re.sub(r"[\u05d0-\u05ea]{2,}\s[\u05d0-\u05ea]{2,}\s[\u05d0-\u05ea]{2,}", "[FULL_NAME]", text)
+    # שם מלא: מוחק רק שם+שם_משפחה שמופיעים אחרי "שם העמית:" או "שם העמית/ה:"
+    text = re.sub(
+        r"(שם העמית(?:/ה)?[:\s]+)([\u05d0-\u05ea\s]{2,30})",
+        r"\1[FULL_NAME]",
+        text
+    )
     return text
+
+
+# ─── תיקון טקסט הפוך (RTL שנחלץ בסדר שגוי) ────────────────
+def fix_reversed_hebrew(text: str) -> str:
+    """
+    pypdf לפעמים מחלץ שורות עבריות הפוכות.
+    בודק כל שורה — אם היא נראית הפוכה (מתחילה בתווים לטיניים/מספרים
+    ומסתיימת בעברית) — הופך אותה.
+    """
+    fixed_lines = []
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if not stripped:
+            fixed_lines.append(line)
+            continue
+        # בדיקה אם השורה מכילה עברית
+        has_hebrew = bool(re.search(r'[\u05d0-\u05ea]', stripped))
+        if has_hebrew:
+            # אם השורה מתחילה בתו לטיני/מספר ומסתיימת בעברית — כנראה הפוכה
+            starts_non_hebrew = bool(re.match(r'^[a-zA-Z0-9\s,.\-]', stripped))
+            ends_hebrew = bool(re.search(r'[\u05d0-\u05ea]$', stripped))
+            if starts_non_hebrew and ends_hebrew:
+                fixed_lines.append(stripped[::-1])
+                continue
+        fixed_lines.append(line)
+    return "\n".join(fixed_lines)
 
 
 # ─── חילוץ טקסט מ-PDF ──────────────────────────────────────
@@ -343,8 +379,13 @@ if file:
                 st.error("❌ לא הצלחתי לקרוא טקסט מהקובץ. ייתכן שהוא מוצפן או סרוק כתמונה.")
                 st.stop()
 
-            anon_text = anonymize_pii(full_text)
+            # תיקון טקסט הפוך לפני אנונימיזציה
+            fixed_text = fix_reversed_hebrew(full_text)
             del full_text
+            gc.collect()
+
+            anon_text = anonymize_pii(fixed_text)
+            del fixed_text
             gc.collect()
 
             trimmed_text = anon_text[:MAX_TEXT_CHARS]
