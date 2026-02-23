@@ -55,61 +55,59 @@ def fmt(n):
 def extract_table_d_python(raw_text):
     """
     Extracts investment tracks and returns DIRECTLY from the raw PDF text.
+
+    Assumption (confirmed by user): on every data row in table D,
+    the track name (מסלול) appears to the RIGHT and the return (תשואה)
+    appears to its LEFT — both on the SAME line.
+
     Strategy:
-      • Find the line containing the header keywords (מסלול / תשואה).
-      • Scan subsequent lines for percentage values.
-      • If the % is on the same line as Hebrew text → that text is the track name.
-      • If the % is on its own line → join the 1–2 preceding lines as the track name.
-    Returns a list of {"מסלול": ..., "תשואה": ...} or None if not found.
+      1. Find the line that is the header of table D (contains מסלול/תשואה/מסלולי).
+      2. Find the NEXT table header after it (contains keywords of tables A/B/C/E/F)
+         — that marks the END of table D.
+      3. Within that window only, extract lines that have Hebrew + percentage.
     """
-    lines = [l.strip() for l in raw_text.split('\n')]
-    # strip blanks for searching but remember original indices
+    lines     = [l.strip() for l in raw_text.split('\n')]
     non_blank = [(i, l) for i, l in enumerate(lines) if l]
 
-    # Locate the header of the investments table
+    # ── Keywords that signal a NEW table section (not table D) ────────────
+    OTHER_TABLE_HEADERS = re.compile(
+        r'פירוט.?הפקדות|תנועות.?בקרן|תשלומים.?צפויים|דמי.?ניהול|'
+        r'הוצאות|הרכב.?נכסים|שינויים.?בחשבון|יתרות|טבלה.?[אבגהו]'
+    )
+
+    # ── Step 1: find table D header ───────────────────────────────────────
     header_idx = None
     for i, line in non_blank:
-        if re.search(r'מסלול.{0,10}תשואה|תשואה.{0,10}מסלול|מסלולי.השקעה', line):
+        if re.search(r'מסלולי.?השקעה|מסלול.{0,6}תשואה|תשואה.{0,6}מסלול', line):
             header_idx = i
             break
 
     if header_idx is None:
-        return None  # fall back to AI result
+        return None
 
-    # Search within the 60 lines that follow the header
-    search_lines = non_blank
-    search_lines = [(i, l) for i, l in non_blank if i > header_idx and i <= header_idx + 60]
+    # ── Step 2: find the next section header after table D ────────────────
+    end_idx = header_idx + 60   # default: 60 lines max
+    for i, line in non_blank:
+        if i <= header_idx:
+            continue
+        if OTHER_TABLE_HEADERS.search(line):
+            end_idx = i
+            break
 
-    PCT = re.compile(r'(-?\d{1,3}(?:\.\d{1,4})?)\s*%')
+    # ── Step 3: scan only within the table D window ───────────────────────
+    PCT    = re.compile(r'-?\d{1,3}(?:\.\d{1,4})?\s*%')
+    HEBREW = re.compile(r'[\u0590-\u05FF]')
+    window = [(i, l) for i, l in non_blank if header_idx < i < end_idx]
 
     rows = []
-    prev_lines = []  # buffer of recent non-% lines for multi-line track names
-
-    for idx, (i, line) in enumerate(search_lines):
-        pct_match = PCT.search(line)
-        if pct_match:
+    for _, line in window:
+        if PCT.search(line) and HEBREW.search(line):
+            pct_match  = PCT.search(line)
             return_val = pct_match.group(0).strip()
-
-            # Text on the same line BEFORE the percentage → that is the track name
-            before = line[:pct_match.start()].strip()
-
-            if before:
-                track = before
-            else:
-                # No track name on this line — use buffered previous lines
-                # Take last 1 or 2 non-empty non-% lines as the track name
-                track_parts = [t for t in prev_lines[-2:] if t]
-                track = " ".join(track_parts).strip()
-
+            # Track name = everything before the percentage on the same line
+            track = line[:pct_match.start()].strip() or line[pct_match.end():].strip()
             if track:
                 rows.append({"מסלול": track, "תשואה": return_val})
-
-            prev_lines = []  # reset after each match
-        else:
-            # Not a percentage line — add to buffer for possible multi-line name
-            # Ignore lines that look like pure headers or separators
-            if line and not re.match(r'^[-=_]+$', line):
-                prev_lines.append(line)
 
     return rows if rows else None
 
@@ -144,52 +142,50 @@ def perform_cross_validation(data):
 # Table E — rebuild summary row with Python sums
 # + validate each column against what AI extracted
 # ─────────────────────────────────────────────
-NUMERIC_COLS_E = ["שכר", "עובד", "מעסיק", "פיצויים", 'סה"כ']
+NUMERIC_COLS_E     = ["שכר", "עובד", "מעסיק", "פיצויים", 'סה"כ']
+VALIDATED_COLS_E   = ["עובד", "מעסיק", "פיצויים", 'סה"כ']   # שכר is always computed — never validated
+TOLERANCE_ILS      = 2.0   # ₪ — covers normal PDF rounding differences
 
 
 def rebuild_table_e_summary(rows_e):
     """
     Replaces the last (summary) row with Python-calculated column sums.
-    Emits Streamlit validation messages for each column.
+    Validates each column against the AI-extracted value (except שכר).
     """
     if len(rows_e) < 2:
         return rows_e
 
     data_rows = rows_e[:-1]
-    last_row = rows_e[-1].copy()
+    last_row  = rows_e[-1].copy()
 
     # ── Column sums ──────────────────────────────────────────────────────
-    sums = {}
-    for col in NUMERIC_COLS_E:
-        sums[col] = sum(clean_num(r.get(col, 0)) for r in data_rows)
+    sums = {col: sum(clean_num(r.get(col, 0)) for r in data_rows) for col in NUMERIC_COLS_E}
 
-    # ── Validate each sum vs. what the AI extracted from the PDF ─────────
+    # ── Validate against AI-extracted summary (skip שכר) ─────────────────
     st.markdown("**אימות שורת סיכום – טבלה ה':**")
-    all_ok = True
-    for col in NUMERIC_COLS_E:
+    for col in VALIDATED_COLS_E:
         ai_val = clean_num(last_row.get(col, 0))
         py_sum = sums[col]
         if py_sum == 0:
-            continue  # nothing to validate
+            continue
         diff = abs(py_sum - ai_val)
-        if diff < 1:  # tolerance: 1 ₪
+        if diff <= TOLERANCE_ILS:
             st.markdown(
                 f'<div class="val-success">✅ עמודת "{col}": סכום Python ({fmt(py_sum)} ₪) = ערך ב-PDF ({fmt(ai_val)} ₪).</div>',
                 unsafe_allow_html=True)
         else:
-            all_ok = False
             st.markdown(
-                f'<div class="val-warn">⚠️ עמודת "{col}": סכום Python ({fmt(py_sum)} ₪) ≠ ערך שחולץ מ-PDF ({fmt(ai_val)} ₪). '
-                f'הסה"כ תוקן לפי Python.</div>',
+                f'<div class="val-warn">⚠️ עמודת "{col}": Python ({fmt(py_sum)} ₪) ≠ PDF ({fmt(ai_val)} ₪) — '
+                f'הפרש {fmt(diff)} ₪. הסה"כ תוקן לפי Python.</div>',
                 unsafe_allow_html=True)
 
     # ── Write corrected summary row ────────────────────────────────────
     for col in NUMERIC_COLS_E:
         last_row[col] = f"{sums[col]:,.0f}" if col == "שכר" else fmt(sums[col])
 
-    last_row["מועד"]        = ""
-    last_row["חודש"]        = ""
-    last_row['שם המעסיק']  = 'סה"כ'
+    last_row["מועד"]       = ""
+    last_row["חודש"]       = ""
+    last_row['שם המעסיק'] = 'סה"כ'
 
     return data_rows + [last_row]
 
@@ -209,9 +205,15 @@ def display_pension_table(rows, title, col_order):
 
 
 def build_excel(all_tables):
-    """Build an Excel file with one sheet per table. Returns bytes."""
+    """Build an Excel file with one sheet per table. Returns bytes.
+    Tries openpyxl first, falls back to xlsxwriter if not installed."""
     output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+    try:
+        engine = "openpyxl"
+        import openpyxl  # noqa: F401
+    except ImportError:
+        engine = "xlsxwriter"
+    with pd.ExcelWriter(output, engine=engine) as writer:
         for sheet_name, rows, col_order in all_tables:
             if not rows:
                 continue
