@@ -6,15 +6,15 @@ import pandas as pd
 import re
 from openai import OpenAI
 
-# הגדרות תצוגה RTL
-st.set_page_config(page_title="מנתח פנסיה - גרסה 25.0", layout="wide")
+# הגדרות RTL ועיצוב
+st.set_page_config(page_title="מנתח פנסיה - גרסת הדיוק המוחלט", layout="wide")
 
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Assistant:wght@400;700&display=swap');
     * { font-family: 'Assistant', sans-serif; direction: rtl; text-align: right; }
     .stTable { direction: rtl !important; width: 100%; }
-    th, td { text-align: right !important; }
+    th, td { text-align: right !important; padding: 10px !important; }
     .val-success { padding: 12px; border-radius: 8px; margin-bottom: 10px; font-weight: bold; background-color: #f0fdf4; border: 1px solid #16a34a; color: #16a34a; }
     .val-error { padding: 12px; border-radius: 8px; margin-bottom: 10px; font-weight: bold; background-color: #fef2f2; border: 1px solid #dc2626; color: #dc2626; }
 </style>
@@ -32,7 +32,7 @@ def clean_num(val):
     except: return 0.0
 
 def perform_cross_validation(data):
-    """אימות הצלבה משופר לזיהוי הנתון הנכון בטבלה ב'"""
+    """אימות הצלבה: סה\"כ הפקדות בטבלה ב' מול ה'"""
     dep_b = 0.0
     for r in data.get("table_b", {}).get("rows", []):
         row_str = " ".join(str(v) for v in r.values())
@@ -58,17 +58,17 @@ def display_pension_table(rows, title, col_order):
     st.subheader(title)
     st.table(df)
 
-def process_audit_v25(client, text):
-    prompt = f"""Extract ALL tables into JSON.
+def process_audit_v26(client, text):
+    prompt = f"""Extract ALL tables into JSON. 
     
-    TABLE E TOTAL ROW RULES:
-    1. The summary row (סה"כ) must be the LAST row.
-    2. STRICT MAPPING:
-       - The largest sum (e.g., 23,034) MUST be in the 'סה"כ' key.
-       - The employee sum (e.g., 7,469) MUST be in the 'עובד' key.
-       - The employer sum (e.g., 8,096) MUST be in the 'מעסיק' key.
-       - The severance sum (e.g., 7,469) MUST be in the 'פיצויים' key.
-    3. NO DATES: The fields 'מועד' and 'חודש' in the summary row MUST be empty.
+    TABLE D PRECISION:
+    - Extract the track return (תשואה) with 100% accuracy. If it's 0.17%, do NOT write 1.0%.
+    
+    TABLE E SUMMARY ALIGNMENT:
+    - The summary row (סה"כ) must be the LAST row.
+    - DO NOT shift columns. The largest number (Total Deposits) belongs in 'סה"כ'.
+    - Employee, Employer, and Severance sums must be mapped to their correct keys.
+    - 'מועד' and 'חודש' must be EMPTY in the summary row.
     
     JSON STRUCTURE:
     {{
@@ -82,14 +82,14 @@ def process_audit_v25(client, text):
     
     res = client.chat.completions.create(
         model="gpt-4o",
-        messages=[{"role": "system", "content": "Financial Auditor. Strictly map the total row sums to the correct keys."},
+        messages=[{"role": "system", "content": "You are a forensic auditor. Table returns and summary row totals must be exact."},
                   {"role": "user", "content": prompt}],
         temperature=0,
         response_format={"type": "json_object"}
     )
     data = json.loads(res.choices[0].message.content)
     
-    # חישוב שכר ויישור שורת סיכום ב-Python
+    # תיקון מתמטי ב-Python
     rows_e = data.get("table_e", {}).get("rows", [])
     if len(rows_e) > 1:
         last_row = rows_e[-1]
@@ -97,19 +97,16 @@ def process_audit_v25(client, text):
         # 1. חישוב שכר
         salary_sum = sum(clean_num(r.get("שכר", 0)) for r in rows_e[:-1])
         
-        # 2. תיקון הסטה: אם סכום ההפקדות (23,034) נחת ב'פיצויים' במקום ב'סה"כ'
-        current_total = clean_num(last_row.get("סה\"כ"))
-        current_sev = clean_num(last_row.get("פיצויים"))
+        # 2. תיקון הסטה (Shift Fix): אם הסה"כ הכללי "ברח" לעמודת הפיצויים
+        total_val = clean_num(last_row.get("סה\"כ"))
+        sev_val = clean_num(last_row.get("פיצויים"))
         
-        if current_sev > current_total and current_sev > 100:
-            # ביצוע הזזה מתקנת שמאלה של הערכים
+        if sev_val > total_val and sev_val > 100:
             last_row["סה\"כ"] = last_row.get("פיצויים")
             last_row["פיצויים"] = last_row.get("מעסיק")
             last_row["מעסיק"] = last_row.get("עובד")
-            # הערך של העובד נמצא בד"כ ב'שכר' בגלל ההסטה
-            last_row["עובד"] = last_row.get("שכר") 
+            last_row["עובד"] = last_row.get("שכר")
             
-        # 3. קיבוע שכר וניקוי תאריכים
         last_row["שכר"] = f"{salary_sum:,.0f}"
         last_row["מועד"] = ""
         last_row["חודש"] = ""
@@ -118,15 +115,15 @@ def process_audit_v25(client, text):
     return data
 
 # ממשק
-st.title("📋 חילוץ נתונים פנסיוני - גרסה 25.0")
+st.title("📋 חילוץ נתונים פנסיוני - גרסה 26.0")
 client = init_client()
 
 if client:
     file = st.file_uploader("העלה דוח PDF", type="pdf")
     if file:
-        with st.spinner("מחלץ ומאמת נתונים..."):
+        with st.spinner("מחלץ נתונים בדיוק מירבי..."):
             raw_text = "\n".join([page.get_text() for page in fitz.open(stream=file.read(), filetype="pdf")])
-            data = process_audit_v25(client, raw_text)
+            data = process_audit_v26(client, raw_text)
             
             if data:
                 perform_cross_validation(data)
@@ -135,5 +132,3 @@ if client:
                 display_pension_table(data.get("table_c", {}).get("rows"), "ג. דמי ניהול והוצאות", ["תיאור", "אחוז"])
                 display_pension_table(data.get("table_d", {}).get("rows"), "ד. מסלולי השקעה", ["מסלול", "תשואה"])
                 display_pension_table(data.get("table_e", {}).get("rows"), "ה. פירוט הפקדות", ["שם המעסיק", "מועד", "חודש", "שכר", "עובד", "מעסיק", "פיצויים", "סה\"כ"])
-                
-                st.download_button("📥 הורד JSON", json.dumps(data, indent=2, ensure_ascii=False), "pension_audit.json")
