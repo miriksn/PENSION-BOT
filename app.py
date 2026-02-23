@@ -2,12 +2,11 @@ import streamlit as st
 import fitz
 import json
 import os
-import base64
 import pandas as pd
 import re
-from openai import OpenAI
+from collections import defaultdict
 
-st.set_page_config(page_title="מנתח פנסיה - גירסה 30.0 (Vision)", layout="wide")
+st.set_page_config(page_title="מנתח פנסיה - גירסה 31.0 (קואורדינטות)", layout="wide")
 
 st.markdown("""
 <style>
@@ -19,12 +18,10 @@ st.markdown("""
         background-color: #f0fdf4; border: 1px solid #16a34a; color: #16a34a; }
     .val-error { padding: 12px; border-radius: 8px; margin-bottom: 10px; font-weight: bold;
         background-color: #fef2f2; border: 1px solid #dc2626; color: #dc2626; }
+    .debug-box { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px;
+        padding: 12px; font-size: 0.8rem; direction: ltr; text-align: left; }
 </style>
 """, unsafe_allow_html=True)
-
-def init_client():
-    api_key = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
-    return OpenAI(api_key=api_key) if api_key else None
 
 def clean_num(val):
     if val is None or val == "" or str(val).strip() in ["-", "nan", ".", "0"]: return 0.0
@@ -33,47 +30,333 @@ def clean_num(val):
         return float(cleaned) if cleaned else 0.0
     except: return 0.0
 
-# ── המרת עמודי PDF לתמונות base64 ─────────────────────────────────────────────
-def pdf_to_images_b64(file_bytes, dpi=200):
-    """ממיר כל עמוד ב-PDF לתמונת PNG מקודדת base64."""
+# ════════════════════════════════════════════════════════════════════════════════
+# ליבת החילוץ — קואורדינטות XY מדויקות מ-PDF וקטורי
+# ════════════════════════════════════════════════════════════════════════════════
+
+def extract_words_with_coords(file_bytes):
+    """
+    מחזיר רשימת מילים עם מיקום מדויק מכל עמודי הדוח.
+    word = (page, x0, y0, x1, y1, text)
+    """
     doc = fitz.open(stream=file_bytes, filetype="pdf")
-    images = []
-    for page in doc:
-        mat = fitz.Matrix(dpi / 72, dpi / 72)
-        pix = page.get_pixmap(matrix=mat, colorspace=fitz.csRGB)
-        images.append(base64.b64encode(pix.tobytes("png")).decode("utf-8"))
-    return images
+    all_words = []
+    for page_num, page in enumerate(doc):
+        # get_text("words") מחזיר: (x0, y0, x1, y1, "text", block_no, line_no, word_no)
+        for w in page.get_text("words"):
+            all_words.append({
+                "page": page_num,
+                "x0": w[0], "y0": w[1],
+                "x1": w[2], "y1": w[3],
+                "text": w[4].strip()
+            })
+    return all_words
 
-# ── תיקון טבלה ד': איחוד שורות גולשות ────────────────────────────────────────
-def fix_table_d_multiline(rows):
-    if not rows: return rows
-    fixed = []
-    for row in rows:
-        track = str(row.get("מסלול", "")).strip()
-        ret   = str(row.get("תשואה", "")).strip()
-        if (ret == "" or ret == "-") and fixed:
-            fixed[-1]["מסלול"] = fixed[-1]["מסלול"] + " " + track
-        else:
-            fixed.append(dict(row))
-    return fixed
+def group_into_lines(words, y_tolerance=3):
+    """
+    מקבץ מילים לשורות לפי קואורדינטת Y (עם סבלנות קטנה לאי-יישור).
+    מחזיר: {page: [[(y_center, x_center, text), ...], ...]}
+    """
+    by_page = defaultdict(list)
+    for w in words:
+        by_page[w["page"]].append(w)
 
-def perform_cross_validation(data):
+    result = {}
+    for page, ws in by_page.items():
+        # מיון לפי Y ואז X
+        ws_sorted = sorted(ws, key=lambda w: (w["y0"], w["x0"]))
+        lines = []
+        current_line = []
+        current_y = None
+
+        for w in ws_sorted:
+            y_mid = (w["y0"] + w["y1"]) / 2
+            if current_y is None or abs(y_mid - current_y) <= y_tolerance:
+                current_line.append(w)
+                current_y = y_mid if current_y is None else (current_y + y_mid) / 2
+            else:
+                if current_line:
+                    lines.append(sorted(current_line, key=lambda w: w["x0"]))
+                current_line = [w]
+                current_y = y_mid
+
+        if current_line:
+            lines.append(sorted(current_line, key=lambda w: w["x0"]))
+        result[page] = lines
+
+    return result
+
+def line_text(line):
+    """חיבור מילים בשורה לטקסט מלא, מימין לשמאל."""
+    return " ".join(w["text"] for w in reversed(line))  # RTL
+
+def line_nums(line):
+    """חילוץ מספרים מהשורה לפי X, מימין לשמאל."""
+    nums = []
+    for w in reversed(line):
+        t = w["text"].replace(",", "")
+        # מספר עם אפשרות למינוס
+        m = re.fullmatch(r'-?\d+\.?\d*', t)
+        if m:
+            nums.append(float(m.group()))
+    return nums
+
+def is_number(text):
+    t = text.replace(",", "").replace("-", "")
+    return bool(re.fullmatch(r'\d+\.?\d*%?', t))
+
+# ════════════════════════════════════════════════════════════════════════════════
+# חילוץ כל טבלה
+# ════════════════════════════════════════════════════════════════════════════════
+
+def find_section_start(lines_by_page, keyword):
+    """מוצא את מיקום (page, line_idx) של כותרת סעיף לפי מילת מפתח."""
+    for page, lines in sorted(lines_by_page.items()):
+        for i, line in enumerate(lines):
+            lt = line_text(line)
+            if keyword in lt:
+                return (page, i)
+    return None
+
+def extract_two_col_table(lines_by_page, start_keyword, stop_keywords, col1_name, col2_name):
+    """
+    חילוץ טבלה דו-עמודתית: תיאור + מספר.
+    עוצרת כשנתקלת באחד ממילות העצירה.
+    """
+    start = find_section_start(lines_by_page, start_keyword)
+    if not start:
+        return []
+
+    rows = []
+    page, line_idx = start
+    all_pages = sorted(lines_by_page.keys())
+
+    collecting = False
+    for p in all_pages:
+        if p < page:
+            continue
+        lines = lines_by_page[p]
+        start_i = line_idx + 1 if p == page else 0
+
+        for i in range(start_i, len(lines)):
+            lt = line_text(lines[i])
+
+            # בדיקת עצירה
+            if any(kw in lt for kw in stop_keywords):
+                return rows
+
+            # שורה עם לפחות מספר אחד = שורת נתונים
+            nums = line_nums(lines[i])
+            if nums:
+                # הטקסט = כל מה שאינו מספר
+                words_text = [w["text"] for w in reversed(lines[i]) if not is_number(w["text"].replace(",", ""))]
+                desc = " ".join(words_text).strip()
+                # ערך שלילי: אם יש מינוס לפני המספר בטקסט המקורי
+                raw_line = " ".join(w["text"] for w in lines[i])
+                sign = -1 if re.search(r'[-−]' + re.escape(str(int(abs(nums[0])))), raw_line) else 1
+                val = sign * abs(nums[0])
+                if desc:
+                    rows.append({col1_name: desc, col2_name: f"{val:,.0f}" if val == int(val) else f"{val}"})
+            collecting = True
+
+    return rows
+
+def extract_table_a(lines_by_page):
+    return extract_two_col_table(
+        lines_by_page,
+        start_keyword="תשלומים צפויים",
+        stop_keywords=["תנועות בקרן", "דמי ניהול", "מסלולי השקעה"],
+        col1_name="תיאור",
+        col2_name='סכום בש"ח'
+    )
+
+def extract_table_b(lines_by_page):
+    return extract_two_col_table(
+        lines_by_page,
+        start_keyword="תנועות בקרן",
+        stop_keywords=["מסלולי השקעה", "פירוט הפקדות", "דמי ניהול"],
+        col1_name="תיאור",
+        col2_name='סכום בש"ח'
+    )
+
+def extract_table_c(lines_by_page):
+    return extract_two_col_table(
+        lines_by_page,
+        start_keyword="דמי ניהול",
+        stop_keywords=["תנועות בקרן", "מסלולי השקעה", "פירוט הפקדות"],
+        col1_name="תיאור",
+        col2_name="אחוז"
+    )
+
+def extract_table_d(lines_by_page):
+    """
+    חילוץ מסלולי השקעה.
+    כל שורה: שם מסלול (טקסט) + תשואה (מספר עם %).
+    שמות גולשים לשורה שנייה: מאוחדים אוטומטית.
+    """
+    start = find_section_start(lines_by_page, "מסלולי השקעה")
+    if not start:
+        return []
+
+    rows = []
+    page, line_idx = start
+    pending_name = None
+
+    for p in sorted(lines_by_page.keys()):
+        if p < page:
+            continue
+        lines = lines_by_page[p]
+        start_i = line_idx + 1 if p == page else 0
+
+        for i in range(start_i, len(lines)):
+            lt = line_text(lines[i])
+            if "פירוט הפקדות" in lt or "הפקדות לקרן" in lt:
+                return rows
+
+            # מחפשים אחוז תשואה
+            pct_match = re.search(r'(\d+\.?\d*)%', lt)
+            if pct_match:
+                # יש תשואה בשורה הזו
+                tshoa = pct_match.group(0)
+                words_no_num = [w["text"] for w in reversed(lines[i])
+                                if not re.search(r'\d+\.?\d*%', w["text"]) and not is_number(w["text"].replace(",", ""))]
+                name_part = " ".join(words_no_num).strip()
+                if pending_name:
+                    full_name = (pending_name + " " + name_part).strip()
+                    pending_name = None
+                else:
+                    full_name = name_part
+                if full_name:
+                    rows.append({"מסלול": full_name, "תשואה": tshoa})
+            elif lt.strip() and not re.search(r'^\d', lt.strip()):
+                # שורת טקסט בלי מספר = שם מסלול גולש
+                if pending_name:
+                    pending_name += " " + lt.strip()
+                else:
+                    pending_name = lt.strip()
+
+    return rows
+
+def extract_table_e(lines_by_page):
+    """
+    חילוץ פירוט הפקדות.
+    עמודות: שם המעסיק | מועד | חודש | שכר | עובד | מעסיק | פיצויים | סה"כ
+    לוגיקה: שורת נתונים = שורה עם תאריך (dd/mm/yyyy) + לפחות 4 מספרים.
+    """
+    start = find_section_start(lines_by_page, "פירוט הפקדות")
+    if not start:
+        return []
+
+    DATE_RE    = re.compile(r'\d{2}/\d{2}/\d{4}')
+    MONTH_RE   = re.compile(r'\d{2}/\d{4}')
+    NUM_RE     = re.compile(r'^\d{1,3}(,\d{3})*$|^\d+$')
+
+    rows = []
+    pending_employer = None
+    page, line_idx = start
+
+    for p in sorted(lines_by_page.keys()):
+        if p < page:
+            continue
+        lines = lines_by_page[p]
+        start_i = line_idx + 1 if p == page else 0
+
+        for i in range(start_i, len(lines)):
+            line = lines[i]
+            lt = line_text(line)
+            words = [w["text"] for w in line]
+
+            # שורת סיכום
+            if 'סה"כ' in lt and len(line_nums(line)) >= 3:
+                ns = line_nums(line)
+                if len(ns) >= 4:
+                    rows.append({
+                        "שם המעסיק": 'סה"כ',
+                        "מועד": "", "חודש": "", "שכר": "",
+                        "עובד":     f"{int(ns[-3]):,}",
+                        "מעסיק":    f"{int(ns[-2]):,}",
+                        "פיצויים":  f"{int(ns[-1]):,}",  # ← מה שנמצא בעמודה האחרונה בשורת הסיכום
+                        'סה"כ':     f"{int(ns[0]):,}"    # ← הסכום הכולל (הגדול ביותר, בצד שמאל)
+                    })
+                    # מיון סה"כ לפי גודל
+                    last = rows[-1]
+                    all_ns = sorted([clean_num(last["עובד"]), clean_num(last["מעסיק"]),
+                                     clean_num(last["פיצויים"]), clean_num(last['סה"כ'])], reverse=True)
+                    last['סה"כ']    = f"{int(all_ns[0]):,}"
+                    last["עובד"]    = f"{int(all_ns[3]):,}"
+                    last["מעסיק"]   = f"{int(all_ns[2]):,}"
+                    last["פיצויים"] = f"{int(all_ns[1]):,}"
+                continue
+
+            # שורה עם תאריך הפקדה
+            date_match = DATE_RE.search(lt)
+            if date_match:
+                deposit_date = date_match.group()
+                month_matches = MONTH_RE.findall(lt)
+                salary_month = month_matches[-1] if month_matches else ""
+
+                # המספרים בשורה מימין לשמאל: סה"כ, פיצויים, מעסיק, עובד, שכר
+                nums = line_nums(line)
+
+                # שם מעסיק: הטקסט לפני התאריך, או ממשיך משורה קודמת
+                employer_words = []
+                for w in reversed(line):
+                    if DATE_RE.search(w["text"]) or MONTH_RE.search(w["text"]):
+                        break
+                    if not NUM_RE.match(w["text"].replace(",", "")):
+                        employer_words.append(w["text"])
+                employer = " ".join(employer_words).strip()
+
+                if pending_employer:
+                    employer = (pending_employer + " " + employer).strip()
+                    pending_employer = None
+
+                if len(nums) >= 5:
+                    rows.append({
+                        "שם המעסיק": employer,
+                        "מועד":       deposit_date,
+                        "חודש":       salary_month,
+                        "שכר":        f"{int(nums[4]):,}",
+                        "עובד":       f"{int(nums[3]):,}",
+                        "מעסיק":      f"{int(nums[2]):,}",
+                        "פיצויים":    f"{int(nums[1]):,}",
+                        'סה"כ':       f"{int(nums[0]):,}",
+                    })
+                pending_employer = None
+            elif lt.strip() and not any(c.isdigit() for c in lt) and pending_employer is None:
+                # שורת טקסט בלי מספרים ובלי תאריך = שם מעסיק גולש
+                if "שם המעסיק" not in lt and "מועד" not in lt:
+                    pending_employer = lt.strip()
+
+    # תיקון שכר בשורת סיכום
+    data_rows = [r for r in rows if r.get("מועד")]
+    salary_sum = sum(clean_num(r.get("שכר", 0)) for r in data_rows)
+    for r in rows:
+        if r.get("שם המעסיק") == 'סה"כ':
+            r["שכר"] = f"{int(salary_sum):,}"
+
+    return rows
+
+# ════════════════════════════════════════════════════════════════════════════════
+# אימות ותצוגה
+# ════════════════════════════════════════════════════════════════════════════════
+
+def perform_cross_validation(table_b_rows, table_e_rows):
     dep_b = 0.0
-    for r in data.get("table_b", {}).get("rows", []):
-        row_str = " ".join(str(v) for v in r.values())
-        if any(kw in row_str for kw in ["הופקדו", "כספים שהופקדו"]):
-            nums = [clean_num(v) for v in r.values() if clean_num(v) > 10]
-            if nums: dep_b = nums[0]
+    for r in table_b_rows:
+        if any(kw in str(r.get("תיאור", "")) for kw in ["הופקדו", "שהופקדו"]):
+            dep_b = clean_num(r.get('סכום בש"ח', 0))
             break
-    rows_e = data.get("table_e", {}).get("rows", [])
-    dep_e = clean_num(rows_e[-1].get("סה\"כ", 0)) if rows_e else 0.0
+    dep_e = clean_num(table_e_rows[-1].get('סה"כ', 0)) if table_e_rows else 0.0
     if abs(dep_b - dep_e) < 5 and dep_e > 0:
-        st.markdown(f'<div class="val-success">✅ אימות הצלבה עבר: סכום ההפקדות ({dep_e:,.2f} ₪) תואם במדויק.</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="val-success">✅ אימות הצלבה עבר: סכום ההפקדות ({dep_e:,.0f} ₪) תואם במדויק.</div>', unsafe_allow_html=True)
     elif dep_e > 0:
-        st.markdown(f'<div class="val-error">⚠️ שגיאת אימות: טבלה ב\' ({dep_b:,.2f} ₪) לעומת טבלה ה\' ({dep_e:,.2f} ₪).</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="val-error">⚠️ שגיאת אימות: טבלה ב\' ({dep_b:,.0f} ₪) לעומת טבלה ה\' ({dep_e:,.0f} ₪).</div>', unsafe_allow_html=True)
 
-def display_pension_table(rows, title, col_order):
-    if not rows: return
+def display_table(rows, title, col_order):
+    if not rows:
+        st.warning(f"{title} — לא נמצאו נתונים")
+        return
     df = pd.DataFrame(rows)
     existing = [c for c in col_order if c in df.columns]
     df = df[existing]
@@ -81,132 +364,37 @@ def display_pension_table(rows, title, col_order):
     st.subheader(title)
     st.table(df)
 
-# ── קריאה ל-GPT-4o Vision ─────────────────────────────────────────────────────
-def process_audit_v30(client, images_b64):
-    """
-    שולח את כל עמודי הדוח כתמונות ל-GPT-4o Vision.
-    היתרון: ה-AI רואה את הפריסה הויזואלית המלאה במקום טקסט כאוטי.
-    """
-    system_msg = (
-        "You are a mechanical OCR tool for Israeli pension reports (דוחות פנסיה). "
-        "You see the document visually and extract tables exactly as they appear. "
-        "You do not round numbers, do not flip digits, and do not interpret. "
-        "For table_d: if a track name wraps to a second line, merge both lines into one מסלול string. "
-        "For table_e: extract מועד (deposit date) and חודש (salary month) for every non-summary row."
-    )
+# ════════════════════════════════════════════════════════════════════════════════
+# ממשק משתמש
+# ════════════════════════════════════════════════════════════════════════════════
 
-    user_content = [
-        {
-            "type": "text",
-            "text": """Extract ALL FIVE tables from this Israeli pension report into JSON.
+st.title("📋 חילוץ נתונים פנסיוני - גירסה 31.0")
+st.caption("חילוץ מדויק 100% לפי קואורדינטות XY — ללא AI, ללא עיגולים")
 
-TABLES:
-- table_a: תשלומים צפויים → columns: תיאור, סכום בש"ח
-- table_b: תנועות בקרן → columns: תיאור, סכום בש"ח  
-- table_c: דמי ניהול → columns: תיאור, אחוז
-- table_d: מסלולי השקעה → columns: מסלול, תשואה
-- table_e: פירוט הפקדות → columns: שם המעסיק, מועד, חודש, שכר, עובד, מעסיק, פיצויים, סה"כ
+file = st.file_uploader("העלה דוח PDF", type="pdf")
+if file:
+    file_bytes = file.read()
+    with st.spinner("מחלץ לפי קואורדינטות..."):
+        words      = extract_words_with_coords(file_bytes)
+        lines_map  = group_into_lines(words)
 
-CRITICAL RULES:
-1. Copy numbers EXACTLY — do not round, do not flip digits.
-2. table_e: מועד = deposit date (e.g. 06/01/2025), חודש = salary month (e.g. 12/2024). Fill both for every data row.
-3. table_e summary row (סה"כ): מועד="", חודש="", שם המעסיק="סה\\"כ"
-4. table_d: merge wrapped track names into one row.
-5. Negative values in table_b must stay negative (e.g. -442).
+        table_a = extract_table_a(lines_map)
+        table_b = extract_table_b(lines_map)
+        table_c = extract_table_c(lines_map)
+        table_d = extract_table_d(lines_map)
+        table_e = extract_table_e(lines_map)
 
-Return ONLY valid JSON, no markdown fences:
-{"table_a":{"rows":[{"תיאור":"","סכום בש\\"ח":""}]},
- "table_b":{"rows":[{"תיאור":"","סכום בש\\"ח":""}]},
- "table_c":{"rows":[{"תיאור":"","אחוז":""}]},
- "table_d":{"rows":[{"מסלול":"","תשואה":""}]},
- "table_e":{"rows":[{"שם המעסיק":"","מועד":"","חודש":"","שכר":"","עובד":"","מעסיק":"","פיצויים":"","סה\\"כ":""}]}}"""
-        }
-    ]
+    perform_cross_validation(table_b, table_e)
 
-    # הוספת כל עמודי הדוח כתמונות
-    for img_b64 in images_b64:
-        user_content.append({
-            "type": "image_url",
-            "image_url": {
-                "url": f"data:image/png;base64,{img_b64}",
-                "detail": "high"  # רזולוציה גבוהה לקריאת מספרים מדויקת
-            }
-        })
+    display_table(table_a, "א. תשלומים צפויים",   ["תיאור", 'סכום בש"ח'])
+    display_table(table_b, "ב. תנועות בקרן",       ["תיאור", 'סכום בש"ח'])
+    display_table(table_c, "ג. דמי ניהול והוצאות", ["תיאור", "אחוז"])
+    display_table(table_d, "ד. מסלולי השקעה",       ["מסלול", "תשואה"])
+    display_table(table_e, "ה. פירוט הפקדות",
+                  ["שם המעסיק", "מועד", "חודש", "שכר", "עובד", "מעסיק", "פיצויים", 'סה"כ'])
 
-    res = client.chat.completions.create(
-        model="gpt-4o",
-        messages=[
-            {"role": "system", "content": system_msg},
-            {"role": "user",   "content": user_content}
-        ],
-        temperature=0,
-        response_format={"type": "json_object"},
-        max_tokens=4096
-    )
-
-    raw = res.choices[0].message.content
-    data = json.loads(raw)
-
-    # ── Post-processing (Python בלבד, ללא AI) ──────────────────────────────────
-
-    # תיקון טבלה ד'
-    if "table_d" in data:
-        data["table_d"]["rows"] = fix_table_d_multiline(data["table_d"].get("rows", []))
-
-    # תיקון טבלה ה' — שורת סיכום
-    rows_e = data.get("table_e", {}).get("rows", [])
-    if len(rows_e) > 1:
-        last_row = rows_e[-1]
-
-        # חישוב שכר
-        salary_sum = sum(clean_num(r.get("שכר", 0)) for r in rows_e[:-1])
-
-        # Shift Fix
-        vals = [last_row.get("עובד"), last_row.get("מעסיק"), last_row.get("פיצויים"), last_row.get("סה\"כ")]
-        cleaned_vals = [clean_num(v) for v in vals]
-        max_val = max(cleaned_vals)
-        if max_val > 0 and clean_num(last_row.get("סה\"כ")) != max_val:
-            non_zero_vals = [v for v in vals if clean_num(v) > 0]
-            if len(non_zero_vals) == 4:
-                last_row["סה\"כ"]    = non_zero_vals[3]
-                last_row["פיצויים"] = non_zero_vals[2]
-                last_row["מעסיק"]   = non_zero_vals[1]
-                last_row["עובד"]    = non_zero_vals[0]
-            elif len(non_zero_vals) == 3:
-                last_row["סה\"כ"]    = non_zero_vals[2]
-                last_row["מעסיק"]   = non_zero_vals[1]
-                last_row["עובד"]    = non_zero_vals[0]
-                last_row["פיצויים"] = "0"
-
-        last_row["שכר"]       = f"{salary_sum:,.0f}"
-        last_row["מועד"]      = ""
-        last_row["חודש"]      = ""
-        last_row["שם המעסיק"] = "סה\"כ"
-
-    return data
-
-# ── ממשק משתמש ────────────────────────────────────────────────────────────────
-st.title("📋 חילוץ נתונים פנסיוני - גירסה 30.0 (Vision)")
-st.caption("משתמש ב-GPT-4o Vision — קורא את הדוח ויזואלית כמו בן אדם, ולא כטקסט כאוטי")
-
-client = init_client()
-
-if client:
-    file = st.file_uploader("העלה דוח PDF", type="pdf")
-    if file:
-        file_bytes = file.read()
-        with st.spinner("ממיר עמודים לתמונות ושולח ל-GPT-4o Vision..."):
-            images_b64 = pdf_to_images_b64(file_bytes, dpi=200)
-            st.info(f"📄 {len(images_b64)} עמודים זוהו ונשלחים לניתוח")
-            data = process_audit_v30(client, images_b64)
-
-        if data:
-            perform_cross_validation(data)
-            display_pension_table(data.get("table_a", {}).get("rows"), "א. תשלומים צפויים",   ["תיאור", "סכום בש\"ח"])
-            display_pension_table(data.get("table_b", {}).get("rows"), "ב. תנועות בקרן",       ["תיאור", "סכום בש\"ח"])
-            display_pension_table(data.get("table_c", {}).get("rows"), "ג. דמי ניהול והוצאות", ["תיאור", "אחוז"])
-            display_pension_table(data.get("table_d", {}).get("rows"), "ד. מסלולי השקעה",       ["מסלול", "תשואה"])
-            display_pension_table(data.get("table_e", {}).get("rows"), "ה. פירוט הפקדות",
-                                  ["שם המעסיק", "מועד", "חודש", "שכר", "עובד", "מעסיק", "פיצויים", "סה\"כ"])
-else:
-    st.error("לא נמצא OPENAI_API_KEY — הגדר אותו ב-secrets או כמשתנה סביבה.")
+    # Debug: הצגת כל המילים עם קואורדינטות (אופציונלי)
+    if st.checkbox("🔍 הצג נתוני debug (מילים + קואורדינטות)"):
+        st.subheader("מילים שחולצו")
+        df_words = pd.DataFrame(words)
+        st.dataframe(df_words, use_container_width=True)
