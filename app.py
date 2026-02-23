@@ -40,24 +40,24 @@ def extract_words(file_bytes):
 # ════════════════════════════════════════════════════════════════════════════════
 
 SECTION_KEYWORDS = {
-    "a": ["א. תשלומים צפויים מקרן הפנסיה"],
-    "b": ["ב. תנועות בקרן הפנסיה"],
-    "c": ["ג. אחוז דמי ניהול"],
-    "d": ["ד. מסלולי השקעה ותשואות"],
-    "e": ["ה. פירוט הפקדות לקרן הפנסיה"],
+    "a": ["א. תשלומים צפויים מקרן הפנסיה",  "א . תשלומים צפויים מקרן הפנסיה"],
+    "b": ["ב. תנועות בקרן הפנסיה",           "ב . תנועות בקרן הפנסיה"],
+    "c": ["ג. אחוז דמי ניהול",               "ג . אחוז דמי ניהול"],
+    "d": ["ד. מסלולי השקעה ותשואות",         "ד . מסלולי השקעה ותשואות"],
+    "e": ["ה. פירוט הפקדות לקרן הפנסיה",    "ה . פירוט הפקדות לקרן הפנסיה"],
 }
 
 # טבלה א' — תמיד בדיוק 6 שורות, השורה האחרונה ידועה
 TABLE_A_LAST_ROW = "שחרור מתשלום הפקדות לקרן במקרה של נכות"
 
+def is_table_a_last_row(lt):
+    return TABLE_A_LAST_ROW in lt
+
 def find_sections(words):
     """
     מחזיר לכל סעיף: page, y0, x_min, x_max.
-    מחפש כותרות לפי שתי שיטות:
-    1. כל מילות המפתח מופיעות באותה שורה
-    2. חיבור הטקסט מכיל את מחרוזת המפתח
+    מטפל במקרה שכמה כותרות נמצאות על אותה שורה (כמו ב' ו-ג' באלטשולר).
     """
-    # קיבוץ לשורות עם y_bucket רחב יותר (6px) לקליטת RTL לא מיושר
     buckets = defaultdict(list)
     for w in words:
         bucket_y = round(w["y0"] / 6) * 6
@@ -65,29 +65,50 @@ def find_sections(words):
 
     sections = {}
     for (page, _), line_words in sorted(buckets.items()):
-        # בנה את הטקסט בשני כיוונים — LTR ו-RTL
-        ltr = " ".join(w["text"] for w in sorted(line_words, key=lambda w: w["x0"]))
-        rtl = " ".join(w["text"] for w in sorted(line_words, key=lambda w: -w["x0"]))
-        # גם ללא רווחים (מילים דבוקות ב-PDF)
-        ltr_nospace = "".join(w["text"] for w in sorted(line_words, key=lambda w: w["x0"]))
-        rtl_nospace = "".join(w["text"] for w in sorted(line_words, key=lambda w: -w["x0"]))
+        lw_sorted = sorted(line_words, key=lambda w: w["x0"])
+        # בנה טקסט בשני כיוונים
+        ltr = " ".join(w["text"] for w in lw_sorted)
+        rtl = " ".join(w["text"] for w in reversed(lw_sorted))
 
         for sec_id, kws in SECTION_KEYWORDS.items():
             if sec_id in sections:
                 continue
             for kw in kws:
-                # בדוק את כל 4 הווריאנטים
-                if any(kw in s for s in [ltr, rtl, ltr_nospace, rtl_nospace]):
-                    xs = [w["x0"] for w in line_words] + [w["x1"] for w in line_words]
-                    ys = [w["y0"] for w in line_words]
-                    sections[sec_id] = {
-                        "page":       page,
-                        "y0":         min(ys),
-                        "x_min":      min(xs),
-                        "x_max":      max(xs),
-                        "page_width": line_words[0]["page_width"]
-                    }
-                    break
+                if kw not in ltr and kw not in rtl:
+                    continue
+
+                # מצא את המילים שמרכיבות את הכותרת הספציפית
+                # חפש את מילת המפתח הראשונה שמזהה את הסעיף (האות + הנקודה)
+                anchor = kw.split()[0]  # "א." או "א ."
+                anchor_clean = anchor.replace(" ", "").replace(".", "")
+
+                # מצא את המילה המזהה בשורה
+                kw_words = []
+                found_anchor = False
+                for w in lw_sorted:
+                    wt = w["text"].replace(".", "").replace(" ", "")
+                    if not found_anchor and wt == anchor_clean:
+                        found_anchor = True
+                    if found_anchor:
+                        kw_words.append(w)
+                        # עצור כשמגיעים לכותרת הבאה (אות עברית + נקודה)
+                        if len(kw_words) > 1 and re.match(r'^[א-ת][\s\.]', w["text"]) and w != kw_words[0]:
+                            kw_words.pop()
+                            break
+
+                if not kw_words:
+                    kw_words = line_words  # fallback
+
+                xs = [w["x0"] for w in kw_words] + [w["x1"] for w in kw_words]
+                ys = [w["y0"] for w in kw_words]
+                sections[sec_id] = {
+                    "page":       page,
+                    "y0":         min(ys),
+                    "x_min":      min(xs),
+                    "x_max":      max(xs),
+                    "page_width": line_words[0]["page_width"]
+                }
+                break
     return sections
 
 def get_section_x_range(sec_info, all_sections, margin=30):
@@ -232,7 +253,7 @@ def extract_table_a(lines):
         if desc:
             rows.append({"תיאור": desc, 'סכום בש"ח': f"{int(amount):,}"})
         # עצירה מוחלטת בשורה האחרונה הידועה — תמיד 6 שורות בלבד
-        if TABLE_A_LAST_ROW in lt:
+        if is_table_a_last_row(lt):
             break
     return rows[:6]  # גיבוי: לא יותר מ-6 שורות בשום מקרה
 
