@@ -6,8 +6,8 @@ import pandas as pd
 import re
 from openai import OpenAI
 
-# הגדרות RTL ועיצוב קשיח - שמירה על כללי גרסה 28
-st.set_page_config(page_title="מנתח פנסיה - גרסה 31.0 (תיקון כלל)", layout="wide")
+# הגדרות RTL ועיצוב קשיח - חזרה לבסיס גירסה 28
+st.set_page_config(page_title="מנתח פנסיה - גרסה 32.0", layout="wide")
 
 st.markdown("""
 <style>
@@ -32,7 +32,6 @@ def clean_num(val):
     except: return 0.0
 
 def perform_cross_validation(data):
-    """אימות הצלבה קשיח בין טבלה ב' ל-ה' כפי שהיה בגרסה 28"""
     dep_b = 0.0
     for r in data.get("table_b", {}).get("rows", []):
         row_str = " ".join(str(v) for v in r.values())
@@ -58,22 +57,17 @@ def display_pension_table(rows, title, col_order):
     st.subheader(title)
     st.table(df)
 
-def process_audit_v31(client, text):
-    # ה-Prompt מבוסס על גרסה 28 עם תיקון ממוקד לטבלה ד'
+def process_audit_v32(client, text):
     prompt = f"""You are a RAW TEXT TRANSCRIBER. Your ONLY job is to copy characters from the text to JSON.
     
-    CRITICAL INSTRUCTIONS (v28 Base):
+    STRICT INSTRUCTIONS (VERBATIM FROM v28):
     1. ZERO INTERPRETATION: Do not flip digits (e.g., 67 remains 67). 
     2. ZERO ROUNDING: If a return is 0.17%, copy 0.17%. Do NOT round.
-    3. TABLE E SUMMARY: 
-       - STOP extraction immediately after the first 'סה"כ' row.
-       - The largest sum (Total of totals) MUST be in the 'סה"כ' column.
-       - 'מועד' and 'חודש' must be empty strings.
+    3. TABLE E SUMMARY: STOP extraction immediately after the first 'סה"כ' row. Clear 'מועד' and 'חודש'.
 
-    FIX FOR TABLE D (CLAL REPORTS):
-    - Track names in Clal often span two lines (e.g., 'מסלול כלל פנסיה' and 'לבני 50 ומטה').
-    - You MUST join these fragmented lines into a single 'מסלול' name.
-    - Copy the 'תשואה' percentage EXACTLY as it appears next to or below the name.
+    FIX FOR CLAL TRACK NAMES (ONLY CHANGE):
+    In Table D, the track name and percentage are often split across multiple lines. 
+    You MUST search for the full track name (e.g., "מסלול כלל פנסיה לבני 50 ומטה") and pair it with the exact numerical percentage (including decimals like 11.25% or 0.17%) that follows it in the text.
 
     JSON STRUCTURE:
     {{
@@ -87,23 +81,20 @@ def process_audit_v31(client, text):
     
     res = client.chat.completions.create(
         model="gpt-4o",
-        messages=[{"role": "system", "content": "You are a mechanical OCR tool. You join multiline track names in Table D but otherwise copy text exactly. No logic. No rounding."},
+        messages=[{"role": "system", "content": "Mechanical OCR mode. Join multiline names in Table D. Verbatim digit copying."},
                   {"role": "user", "content": prompt}],
         temperature=0,
         response_format={"type": "json_object"}
     )
     data = json.loads(res.choices[0].message.content)
     
-    # לוגיקת תיקון שורת סיכום ב-Python (מגרסה 28)
     rows_e = data.get("table_e", {}).get("rows", [])
     if len(rows_e) > 1:
         last_row = rows_e[-1]
         salary_sum = sum(clean_num(r.get("שכר", 0)) for r in rows_e[:-1])
-        
         vals = [last_row.get("עובד"), last_row.get("מעסיק"), last_row.get("פיצויים"), last_row.get("סה\"כ")]
         cleaned_vals = [clean_num(v) for v in vals]
         max_val = max(cleaned_vals)
-        
         if max_val > 0 and clean_num(last_row.get("סה\"כ")) != max_val:
             non_zero_vals = [v for v in vals if clean_num(v) > 0]
             if len(non_zero_vals) == 4:
@@ -111,24 +102,20 @@ def process_audit_v31(client, text):
             elif len(non_zero_vals) == 3:
                  last_row["סה\"כ"], last_row["מעסיק"], last_row["עובד"] = non_zero_vals[2], non_zero_vals[1], non_zero_vals[0]
                  last_row["פיצויים"] = "0"
-            
         last_row["שכר"] = f"{salary_sum:,.0f}"
-        last_row["מועד"], last_row["חודש"] = "", ""
-        last_row["שם המעסיק"] = "סה\"כ"
-    
+        last_row["מועד"], last_row["חודש"], last_row["שם המעסיק"] = "", "", "סה\"כ"
     return data
 
 # ממשק
-st.title("📋 מנתח פנסיה - גרסה 31.0")
+st.title("📋 חילוץ נתונים פנסיוני - גרסה 32.0 (תיקון תשואות)")
 client = init_client()
 
 if client:
     file = st.file_uploader("העלה דוח PDF", type="pdf")
     if file:
-        with st.spinner("מעתיק נתונים במדויק (תיקון מסלולים מרובי שורות)..."):
+        with st.spinner("מעתיק נתונים במדויק (תיקון מסלולים)..."):
             raw_text = "\n".join([page.get_text() for page in fitz.open(stream=file.read(), filetype="pdf")])
-            data = process_audit_v31(client, raw_text)
-            
+            data = process_audit_v32(client, raw_text)
             if data:
                 perform_cross_validation(data)
                 display_pension_table(data.get("table_a", {}).get("rows"), "א. תשלומים צפויים", ["תיאור", "סכום בש\"ח"])
