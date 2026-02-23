@@ -14,7 +14,6 @@ st.set_page_config(
     page_icon="📋"
 )
 
-# ─── CSS לתמיכה בעברית ─────────────────────────────────────
 st.markdown("""
 <style>
     * { direction: rtl; text-align: right; }
@@ -24,59 +23,34 @@ st.markdown("""
     td { padding: 8px 14px; border-bottom: 1px solid #e2e8f0; font-size: 0.9rem; }
     tr:nth-child(even) { background-color: #f7fafc; }
     tr:hover { background-color: #ebf4ff; }
-    .table-title {
-        background: #1a3a5c;
-        color: white;
-        padding: 10px 16px;
-        border-radius: 6px 6px 0 0;
-        font-size: 1.05rem;
-        font-weight: bold;
-        margin-top: 1.5rem;
-    }
-    .report-header {
-        background: linear-gradient(135deg, #1a3a5c, #2d6a9f);
-        color: white;
-        padding: 16px 20px;
-        border-radius: 10px;
-        margin-bottom: 1.5rem;
-    }
+    .table-title { background: #1a3a5c; color: white; padding: 10px 16px; border-radius: 6px 6px 0 0; font-size: 1.05rem; font-weight: bold; margin-top: 1.5rem; }
+    .report-header { background: linear-gradient(135deg, #1a3a5c, #2d6a9f); color: white; padding: 16px 20px; border-radius: 10px; margin-bottom: 1.5rem; }
     .report-header h3 { color: white; margin: 0 0 6px 0; }
     .report-header p { margin: 4px 0; font-size: 0.9rem; opacity: 0.9; }
-    .stFileUploader { direction: rtl; }
     .negative { color: #c53030; }
     .positive { color: #276749; }
+    .warning-box { background: #fffbeb; border-right: 4px solid #d97706; padding: 10px 14px; border-radius: 4px; margin: 8px 0; font-size: 0.9rem; }
 </style>
 """, unsafe_allow_html=True)
 
-# ─── קבועי אבטחה ───────────────────────────────────────────
 MAX_FILE_SIZE_MB = 5
 MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
 MAX_PAGES = 4
 RATE_LIMIT_MAX = 10
 RATE_LIMIT_WINDOW_SEC = 3600
 
-# ─── משיכת המפתח ────────────────────────────────────────────
 try:
     API_KEY = st.secrets["OPENAI_API_KEY"]
-    client = OpenAI(
-        api_key=API_KEY,
-        default_headers={"OpenAI-No-Store": "true"},
-    )
+    client = OpenAI(api_key=API_KEY, default_headers={"OpenAI-No-Store": "true"})
 except Exception:
-    st.error("⚠️ שגיאה: מפתח ה-API לא נמצא בכספת (Secrets).")
+    st.error("⚠️ שגיאה: מפתח ה-API לא נמצא בכספת.")
     st.stop()
 
 
-# ─── Rate limiting ───────────────────────────────────────────
 def _get_client_id() -> str:
     headers = st.context.headers if hasattr(st, "context") else {}
-    raw_ip = (
-        headers.get("X-Forwarded-For", "")
-        or headers.get("X-Real-Ip", "")
-        or "unknown"
-    )
-    ip = raw_ip.split(",")[0].strip()
-    return hashlib.sha256(ip.encode()).hexdigest()[:16]
+    raw_ip = headers.get("X-Forwarded-For", "") or headers.get("X-Real-Ip", "") or "unknown"
+    return hashlib.sha256(raw_ip.split(",")[0].strip().encode()).hexdigest()[:16]
 
 
 def _check_rate_limit() -> tuple[bool, str]:
@@ -87,14 +61,12 @@ def _check_rate_limit() -> tuple[bool, str]:
         st.session_state[key] = []
     st.session_state[key] = [t for t in st.session_state[key] if now - t < RATE_LIMIT_WINDOW_SEC]
     if len(st.session_state[key]) >= RATE_LIMIT_MAX:
-        remaining = int(RATE_LIMIT_WINDOW_SEC - (now - st.session_state[key][0]))
-        mins = remaining // 60
+        mins = int((RATE_LIMIT_WINDOW_SEC - (now - st.session_state[key][0])) / 60)
         return False, f"❌ הגעת למגבלת {RATE_LIMIT_MAX} עיבודים לשעה. נסה שוב בעוד {mins} דקות."
     st.session_state[key].append(now)
     return True, ""
 
 
-# ─── ולידציית קובץ ──────────────────────────────────────────
 def validate_file(uploaded_file) -> tuple[bool, str]:
     content = uploaded_file.read()
     uploaded_file.seek(0)
@@ -105,167 +77,202 @@ def validate_file(uploaded_file) -> tuple[bool, str]:
     return True, ""
 
 
-# ─── המרת PDF לתמונות (base64) ──────────────────────────────
 def pdf_to_images_b64(pdf_bytes: bytes, max_pages: int = MAX_PAGES) -> list[str]:
-    """
-    ממיר עמודי PDF לתמונות PNG מקודדות ב-base64.
-    משתמש ב-PyMuPDF (fitz) — קורא את הדף כמו שהוא נראה,
-    ללא בעיות של חילוץ טקסט הפוך או שורות חסרות.
-    """
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     images_b64 = []
-    pages_to_process = min(len(doc), max_pages)
-
-    for page_num in range(pages_to_process):
+    for page_num in range(min(len(doc), max_pages)):
         page = doc[page_num]
-        # 200 DPI — חד מספיק לקריאת טקסט עברי קטן
         mat = fitz.Matrix(200 / 72, 200 / 72)
         pix = page.get_pixmap(matrix=mat)
-        img_bytes = pix.tobytes("png")
-        b64 = base64.b64encode(img_bytes).decode("utf-8")
+        b64 = base64.b64encode(pix.tobytes("png")).decode("utf-8")
         images_b64.append(b64)
-        del pix, img_bytes
-
+        del pix
     doc.close()
     return images_b64
 
 
-# ─── Prompt ל-GPT-4o Vision ──────────────────────────────────
-def build_vision_messages(images_b64: list[str]) -> list[dict]:
-    system_prompt = """אתה מחלץ נתונים מדוחות פנסיה ישראליים.
-תפקידך: לקרוא את התמונות של הדוח ולחלץ את הטבלאות בדיוק מלא.
+# ─── שלב 1: קריאת הדוח בשפה חופשית (Chain of Thought) ────────
+def step1_read_report(images_b64: list[str]) -> str | None:
+    """
+    מבקש מה-AI לתאר כל טבלה שורה אחר שורה בטקסט חופשי.
+    זה מונע טעויות של מיפוי עמודות שגוי ל-JSON ישירות.
+    """
+    prompt = """אתה קורא דוח פנסיה ישראלי.
+תאר כל טבלה שורה אחר שורה — כולל כל המספרים המדויקים.
 
 חוקים קריטיים:
-1. העתק את הטקסט העברי בדיוק כפי שמופיע בדוח
-2. שמור על סימני מינוס (-) בסכומים שליליים — חשוב מאוד
-3. שם הקרן — קח מכותרת הדוח הראשית (לדוגמה: "אלטשולר שחם פנסיה מקיפה")
-4. אם שדה לא קיים, החזר null
+1. התעלם לחלוטין מכל טקסט בתיבות צדדיות (סיידבר) — כגון "לידיעתך ממוצע דמי ניהול בקרן", "בדוק אם סכומי הביטוח", "שים לב לגובה דמי הניהול", "מומלץ לבדוק"
+2. שמור על סימני מינוס (-) בסכומים שליליים
+3. אסור לדלג על אף שורה — כולל שורות עם ערך 0
 
-כלל גורף לכל הטבלאות — התעלמות מסיידבר:
-- הדוחות מכילים תיבות צדדיות (סיידבר) עם טקסט הסברי מחוץ לטבלאות
-- התעלם לחלוטין מכל טקסט שנמצא מחוץ לגבולות הטבלה הרשמית
-- דוגמאות לטקסט סיידבר שיש להתעלם ממנו לחלוטין:
-  "לידיעתך ממוצע דמי ניהול בקרן: מהפקדה X% מחיסכון Y%"
-  "בדוק אם סכומי הביטוח שלך מתאימים לצרכיך"
-  "שים לב לגובה דמי הניהול הנגבים ממך"
-  "מומלץ לבדוק שההפקדות בדוח תואמות"
-- אם ערך בסיידבר נראה זהה לערך בטבלה — קח רק את הערך שבתוך הטבלה
+לגבי טבלא ב:
+- פרט כל שורה בנפרד, כולל "עלות ביטוח לסיכוני נכות" ו"עלות ביטוח למקרה מוות" — הן שתי שורות נפרדות
+- בסוף, חשב: האם סכום כל השורות (כולל מינוסים) שווה ליתרה הסופית? אם לא — ציין אילו שורות חסרות
 
-הוראות ספציפיות לטבלא ב (תנועות בקרן):
-- חלץ כל שורה בנפרד — גם אם יש שתי שורות ביטוח נפרדות (נכות ומוות) חלץ כל אחת בשורה משלה
-- שורת "הפסדים בניכוי הוצאות ניהול השקעות" היא שורה קריטית — אל תדלג עליה
-- בדיקת חובה: חשב את הסכום של כל השורות מלבד האחרונה. התוצאה חייבת להיות שווה לשורה האחרונה (יתרה בסוף התקופה). אם לא — יש שורות חסרות, חזור ותחפש.
-- שורות שליליות (-) חייבות להופיע עם מינוס
-
-הוראות ספציפיות לטבלא ג (דמי ניהול):
-- הטבלה עצמה נמצאת בתוך המסגרת/טבלה הרשמית עם כותרת "ג. אחוז דמי ניהול והוצאות"
-- בדוח רבעוני: הטבלה מכילה בדיוק 2 שורות — "דמי ניהול מהפקדה" ו"דמי ניהול מחיסכון"
-- בדוח שנתי: הטבלה מכילה בדיוק 3 שורות — "דמי ניהול מהפקדה", "דמי ניהול מחיסכון", "הוצאות ניהול השקעות"
-- ליד הטבלה מופיעה תיבה צדדית עם הכיתוב "לידיעתך ממוצע דמי ניהול בקרן: מהפקדה X% מחיסכון Y%" — זהו ממוצע השוק, אל תכלול אותו בשום פנים
-- ההבדל: ערכי הטבלה הם של העמית הספציפי. ערכי הסיידבר הם ממוצע כלל העמיתים בקרן — הם כמעט תמיד שונים
-
-הוראות ספציפיות לטבלא ה (פירוט הפקדות):
+לגבי טבלא ה:
 - הטבלה כתובה מימין לשמאל
-- סדר העמודות מימין לשמאל הוא בדיוק: [1]מועד הפקדה | [2]עבור חודש | [3]משכורת | [4]תגמולי עובד | [5]תגמולי מעסיק | [6]פיצויים | [7]סה"כ
-- עמודה [1] "מועד הפקדה" — תאריך מלא עם יום, חודש ושנה: DD/MM/YYYY (לדוגמה: 03/02/2025). תמיד יש בה 3 מקטעים מופרדים בלוכסן
-- עמודה [2] "עבור חודש" — חודש ושנה בלבד: MM/YYYY (לדוגמה: 01/2025). תמיד יש בה 2 מקטעים בלבד
-- ההבדל הקריטי: מועד ההפקדה מתחיל תמיד ביום (01-31), ועבור חודש מתחיל בחודש (01-12) — אבל שתיהן עשויות להתחיל באותם מספרים, לכן קרא את מספר המקטעים: 3 = תאריך מלא, 2 = חודש/שנה
-- חלץ כל שורה בנפרד — כולל שורות עם סכומים קטנים כמו 38 ₪ או 88 ₪
-- בדיקת חובה לטבלא ה: חשב את סכום עמודת "סה"כ" של כל השורות שחילצת. אם הסכום אינו שווה לסה"כ בשורת הסיכום — יש שורות חסרות. חזור לתמונה וחפש שורות נוספות, כולל שורות עם ערכים קטנים כמו 38, 88 וכדומה.
+- לכל שורה, קרא את הערכים מימין לשמאל: [מועד הפקדה] [עבור חודש] [משכורת] [תגמולי עובד] [תגמולי מעסיק] [פיצויים] [סה"כ]
+- מועד הפקדה הוא תאריך מלא עם יום: DD/MM/YYYY
+- עבור חודש הוא MM/YYYY בלבד
+- פרט כל שורה — כולל שורות עם סכומים קטנים (38, 88 וכדומה)
+- בסוף, ודא שסכום עמודת סה"כ שווה לסה"כ בשורת הסיכום
 
-כלל גורף לכל הטבלאות:
-- אסור לדלג על אף שורה — גם אם הערך בה הוא 0, גם אם היא נראית לא חשובה
-- כל שורה שמופיעה בדוח חייבת להופיע בJSON
+פרמט:
 
-החזר JSON בלבד בפורמט:
-{
-  "report_info": {
-    "fund_name": "שם הקרן/קופה מהכותרת",
-    "report_type": "רבעוני או שנתי",
-    "report_period": "תקופת הדוח כמו שמופיעה בדוח",
-    "report_date": "תאריך הדוח"
-  },
-  "table_a": {
-    "title": "א. תשלומים צפויים מקרן הפנסיה",
-    "rows": [{"description": "טקסט מדויק", "value": "סכום"}]
-  },
-  "table_b": {
-    "title": "ב. תנועות בקרן הפנסיה בתקופת הדוח",
-    "rows": [{"description": "טקסט מדויק", "value": "סכום (שמור - אם שלילי)"}]
-  },
-  "table_c": {
-    "title": "ג. אחוז דמי ניהול והוצאות",
-    "rows": [{"description": "טקסט מדויק", "value": "אחוז"}]
-  },
-  "table_d": {
-    "title": "ד. מסלולי השקעה ותשואות",
-    "rows": [{"description": "שם המסלול", "value": "תשואה (שמור - אם שלילי)"}]
-  },
-  "table_e": {
-    "title": "ה. פירוט הפקדות לקרן הפנסיה",
-    "rows": [
-      {
-        "employer_name": "שם מעסיק אם קיים",
-        "deposit_date": "מועד הפקדה",
-        "salary_month": "עבור חודש משכורת",
-        "salary": "משכורת",
-        "employee": "תגמולי עובד",
-        "employer": "תגמולי מעסיק",
-        "severance": "פיצויים",
-        "total": "סה\"כ הפקדות"
-      }
-    ],
-    "totals": {
-      "employee": "סה\"כ תגמולי עובד",
-      "employer": "סה\"כ תגמולי מעסיק",
-      "severance": "סה\"כ פיצויים",
-      "total": "סה\"כ הפקדות"
-    }
-  }
-}"""
+=== פרטי הדוח ===
+שם הקרן: ...
+סוג דוח: ...
+תקופה: ...
+תאריך: ...
 
-    content = [{"type": "text", "text": "חלץ את הנתונים מהדוח הפנסיוני. החזר JSON בלבד."}]
+=== טבלא א ===
+שורה 1: [תיאור] | [ערך]
+...
+
+=== טבלא ב ===
+שורה 1: [תיאור] | [ערך]
+...
+בדיקת סכום: [חישוב]
+
+=== טבלא ג ===
+שורה 1: [תיאור] | [ערך]
+...
+
+=== טבלא ד ===
+שורה 1: [תיאור] | [ערך]
+...
+
+=== טבלא ה ===
+שורה 1: מועד=[DD/MM/YYYY] | חודש=[MM/YYYY] | משכורת=[X] | עובד=[X] | מעסיק=[X] | פיצויים=[X] | סה"כ=[X]
+...
+בדיקת סכום: [חישוב]"""
+
+    content = [{"type": "text", "text": prompt}]
     for b64 in images_b64:
-        content.append({
-            "type": "image_url",
-            "image_url": {
-                "url": f"data:image/png;base64,{b64}",
-                "detail": "high"
-            }
-        })
+        content.append({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}", "detail": "high"}})
 
-    return [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": content},
-    ]
-
-
-# ─── שליחה ל-GPT-4o Vision ───────────────────────────────────
-def extract_tables_with_vision(images_b64: list[str]) -> dict | None:
     try:
         response = client.chat.completions.create(
             model="gpt-4o",
-            messages=build_vision_messages(images_b64),
+            messages=[{"role": "user", "content": content}],
+            temperature=0.0,
+            max_tokens=3000,
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        st.error(f"❌ שגיאה בשלב 1: {str(e)[:100]}")
+        return None
+
+
+# ─── שלב 2: המרת התיאור ל-JSON מובנה ────────────────────────
+def step2_to_json(text_description: str) -> dict | None:
+    """
+    ממיר את התיאור הטקסטואלי מהשלב הראשון ל-JSON מובנה.
+    """
+    prompt = f"""המר את התיאור הבא של דוח פנסיה ל-JSON בדיוק כפי שהוא.
+אל תשנה, אל תוסיף, אל תחסר — רק המר לפורמט.
+
+{text_description}
+
+החזר JSON בלבד בפורמט:
+{{
+  "report_info": {{
+    "fund_name": "...",
+    "report_type": "רבעוני או שנתי",
+    "report_period": "...",
+    "report_date": "..."
+  }},
+  "table_a": {{
+    "rows": [{{"description": "...", "value": "..."}}]
+  }},
+  "table_b": {{
+    "rows": [{{"description": "...", "value": "..."}}]
+  }},
+  "table_c": {{
+    "rows": [{{"description": "...", "value": "..."}}]
+  }},
+  "table_d": {{
+    "rows": [{{"description": "...", "value": "..."}}]
+  }},
+  "table_e": {{
+    "rows": [
+      {{
+        "employer_name": null,
+        "deposit_date": "DD/MM/YYYY",
+        "salary_month": "MM/YYYY",
+        "salary": "...",
+        "employee": "...",
+        "employer": "...",
+        "severance": "...",
+        "total": "..."
+      }}
+    ],
+    "totals": {{
+      "employee": "...",
+      "employer": "...",
+      "severance": "...",
+      "total": "..."
+    }}
+  }}
+}}"""
+
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": prompt}],
             temperature=0.0,
             max_tokens=4000,
             response_format={"type": "json_object"},
         )
-        raw = response.choices[0].message.content
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        st.error("❌ תגובת ה-AI לא הייתה בפורמט תקין. נסה שוב.")
-        return None
+        return json.loads(response.choices[0].message.content)
     except Exception as e:
-        err = str(e)
-        if "insufficient_quota" in err or "quota" in err.lower():
-            st.error("❌ חריגה מהמכסה ב-OpenAI.")
-        else:
-            st.error(f"❌ שגיאה: {err[:120]}")
+        st.error(f"❌ שגיאה בשלב 2: {str(e)[:100]}")
         return None
+
+
+# ─── ולידציה בצד Python ──────────────────────────────────────
+def parse_num(s) -> float | None:
+    """ממיר מחרוזת מספר לfloat, מטפל במינוסים ובפסיקים."""
+    if s is None:
+        return None
+    try:
+        return float(str(s).replace(",", "").replace("−", "-").strip())
+    except:
+        return None
+
+
+def validate_table_b(data: dict) -> list[str]:
+    """בודק שסכום שורות טבלא ב שווה לשורה האחרונה."""
+    warnings = []
+    rows = data.get("table_b", {}).get("rows", [])
+    if len(rows) < 2:
+        return warnings
+    total_row = rows[-1]
+    other_rows = rows[:-1]
+    total_val = parse_num(total_row.get("value"))
+    calc_sum = sum(parse_num(r.get("value")) or 0 for r in other_rows)
+    if total_val is not None and abs(calc_sum - total_val) > 1:
+        warnings.append(f"⚠️ טבלא ב: סכום השורות ({calc_sum:,.0f}) ≠ יתרה סופית ({total_val:,.0f}). ייתכן שחסרות שורות.")
+    return warnings
+
+
+def validate_table_e(data: dict) -> list[str]:
+    """בודק שסכום שורות טבלא ה שווה לסה"כ."""
+    warnings = []
+    tbl = data.get("table_e", {})
+    rows = tbl.get("rows", [])
+    totals = tbl.get("totals", {})
+    if not rows or not totals:
+        return warnings
+    declared_total = parse_num(totals.get("total"))
+    calc_sum = sum(parse_num(r.get("total")) or 0 for r in rows)
+    if declared_total is not None and abs(calc_sum - declared_total) > 1:
+        warnings.append(f"⚠️ טבלא ה: סכום השורות ({calc_sum:,.0f}) ≠ סה\"כ מוצהר ({declared_total:,.0f}). ייתכן שחסרות שורות.")
+    return warnings
 
 
 # ─── הצגת הטבלאות ────────────────────────────────────────────
-def display_tables(data: dict):
+def display_tables(data: dict, warnings: list[str]):
     info = data.get("report_info", {})
 
     st.markdown(f"""
@@ -277,6 +284,10 @@ def display_tables(data: dict):
     </div>
     """, unsafe_allow_html=True)
 
+    if warnings:
+        for w in warnings:
+            st.markdown(f'<div class="warning-box">{w}</div>', unsafe_allow_html=True)
+
     col1, col2 = st.columns(2)
 
     with col1:
@@ -287,8 +298,7 @@ def display_tables(data: dict):
             html = '<table><thead><tr><th>פריט</th><th>סכום (ש"ח)</th></tr></thead><tbody>'
             for r in rows:
                 html += f"<tr><td>{r.get('description','')}</td><td>{r.get('value','')}</td></tr>"
-            html += "</tbody></table>"
-            st.markdown(html, unsafe_allow_html=True)
+            st.markdown(html + "</tbody></table>", unsafe_allow_html=True)
 
     with col2:
         tbl = data.get("table_b", {})
@@ -300,8 +310,7 @@ def display_tables(data: dict):
                 val = str(r.get('value', ''))
                 css = ' class="negative"' if val.lstrip().startswith('-') else ''
                 html += f"<tr><td>{r.get('description','')}</td><td{css}>{val}</td></tr>"
-            html += "</tbody></table>"
-            st.markdown(html, unsafe_allow_html=True)
+            st.markdown(html + "</tbody></table>", unsafe_allow_html=True)
 
     col3, col4 = st.columns(2)
 
@@ -313,8 +322,7 @@ def display_tables(data: dict):
             html = "<table><thead><tr><th>פריט</th><th>אחוז</th></tr></thead><tbody>"
             for r in rows:
                 html += f"<tr><td>{r.get('description','')}</td><td>{r.get('value','')}</td></tr>"
-            html += "</tbody></table>"
-            st.markdown(html, unsafe_allow_html=True)
+            st.markdown(html + "</tbody></table>", unsafe_allow_html=True)
 
     with col4:
         tbl = data.get("table_d", {})
@@ -326,8 +334,7 @@ def display_tables(data: dict):
                 val = str(r.get('value', ''))
                 css = ' class="negative"' if val.lstrip().startswith('-') else ' class="positive"'
                 html += f"<tr><td>{r.get('description','')}</td><td{css}>{val}</td></tr>"
-            html += "</tbody></table>"
-            st.markdown(html, unsafe_allow_html=True)
+            st.markdown(html + "</tbody></table>", unsafe_allow_html=True)
 
     st.markdown("---")
     tbl = data.get("table_e", {})
@@ -335,23 +342,23 @@ def display_tables(data: dict):
     rows = tbl.get("rows", [])
     totals = tbl.get("totals", {})
     if rows:
-        has_employer_col = any(r.get("employer_name") for r in rows)
-        headers = ""
-        if has_employer_col:
-            headers += "<th>שם המעסיק</th>"
-        headers += "<th>מועד הפקדה</th><th>עבור חודש</th><th>משכורת</th><th>תגמולי עובד</th><th>תגמולי מעסיק</th><th>פיצויים</th><th>סה\"כ</th>"
+        has_employer = any(r.get("employer_name") for r in rows)
+        headers = ("<th>שם המעסיק</th>" if has_employer else "") + \
+            "<th>מועד הפקדה</th><th>עבור חודש</th><th>משכורת</th><th>תגמולי עובד</th><th>תגמולי מעסיק</th><th>פיצויים</th><th>סה\"כ</th>"
         html = f"<table><thead><tr>{headers}</tr></thead><tbody>"
         for r in rows:
-            row_html = ""
-            if has_employer_col:
-                row_html += f"<td>{r.get('employer_name','')}</td>"
-            row_html += f"<td>{r.get('deposit_date','')}</td><td>{r.get('salary_month','')}</td><td>{r.get('salary','')}</td><td>{r.get('employee','')}</td><td>{r.get('employer','')}</td><td>{r.get('severance','')}</td><td><strong>{r.get('total','')}</strong></td>"
+            row_html = (f"<td>{r.get('employer_name','')}</td>" if has_employer else "") + \
+                f"<td>{r.get('deposit_date','')}</td><td>{r.get('salary_month','')}</td>" \
+                f"<td>{r.get('salary','')}</td><td>{r.get('employee','')}</td>" \
+                f"<td>{r.get('employer','')}</td><td>{r.get('severance','')}</td>" \
+                f"<td><strong>{r.get('total','')}</strong></td>"
             html += f"<tr>{row_html}</tr>"
         if totals:
-            colspan = 4 if has_employer_col else 3
-            html += f'<tr style="background:#dbeafe; font-weight:bold;"><td colspan="{colspan}">סה"כ</td><td>{totals.get("employee","")}</td><td>{totals.get("employer","")}</td><td>{totals.get("severance","")}</td><td>{totals.get("total","")}</td></tr>'
-        html += "</tbody></table>"
-        st.markdown(html, unsafe_allow_html=True)
+            colspan = 4 if has_employer else 3
+            html += f'<tr style="background:#dbeafe;font-weight:bold;"><td colspan="{colspan}">סה"כ</td>' \
+                    f'<td>{totals.get("employee","")}</td><td>{totals.get("employer","")}</td>' \
+                    f'<td>{totals.get("severance","")}</td><td>{totals.get("total","")}</td></tr>'
+        st.markdown(html + "</tbody></table>", unsafe_allow_html=True)
 
 
 # ─── ממשק משתמש ─────────────────────────────────────────────
@@ -372,37 +379,47 @@ if file:
         st.stop()
 
     try:
-        with st.spinner("🔄 ממיר דוח לתמונות ומחלץ טבלאות... אנא המתן"):
-            pdf_bytes = file.read()
+        pdf_bytes = file.read()
+        images_b64 = pdf_to_images_b64(pdf_bytes)
+        del pdf_bytes
+        gc.collect()
 
-            images_b64 = pdf_to_images_b64(pdf_bytes)
-            del pdf_bytes
-            gc.collect()
+        if not images_b64:
+            st.error("❌ לא הצלחתי לפתוח את הקובץ.")
+            st.stop()
 
-            if not images_b64:
-                st.error("❌ לא הצלחתי לפתוח את הקובץ.")
-                st.stop()
+        # שלב 1
+        with st.spinner("🔍 שלב 1/2: קורא את הדוח..."):
+            text_desc = step1_read_report(images_b64)
 
-            st.info(f"📄 עמודים לעיבוד: {len(images_b64)}")
+        if not text_desc:
+            st.stop()
 
-            result = extract_tables_with_vision(images_b64)
+        with st.expander("📝 תיאור גולמי מהדוח (לצורך בדיקה)"):
+            st.text(text_desc)
+
+        # שלב 2
+        with st.spinner("📊 שלב 2/2: ממיר לטבלאות..."):
+            result = step2_to_json(text_desc)
             del images_b64
             gc.collect()
 
-            if result:
-                st.success("✅ הטבלאות חולצו בהצלחה!")
-                display_tables(result)
+        if result:
+            # ולידציה
+            warnings = validate_table_b(result) + validate_table_e(result)
+            st.success("✅ הטבלאות חולצו!")
+            display_tables(result, warnings)
 
-                with st.expander("📥 הורד נתונים גולמיים (JSON)"):
-                    st.download_button(
-                        label="הורד JSON",
-                        data=json.dumps(result, ensure_ascii=False, indent=2),
-                        file_name="pension_data.json",
-                        mime="application/json",
-                    )
+            with st.expander("📥 הורד נתונים גולמיים (JSON)"):
+                st.download_button(
+                    label="הורד JSON",
+                    data=json.dumps(result, ensure_ascii=False, indent=2),
+                    file_name="pension_data.json",
+                    mime="application/json",
+                )
 
     except Exception as e:
-        st.error(f"❌ אירעה שגיאה: {str(e)[:150]}")
+        st.error(f"❌ שגיאה: {str(e)[:150]}")
 
 st.markdown("---")
 st.caption("כלי עזר בלבד | אינו מהווה ייעוץ פנסיוני מקצועי")
