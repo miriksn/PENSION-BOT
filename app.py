@@ -7,8 +7,8 @@ import re
 import io
 from openai import OpenAI
 
-# הגדרות RTL ועיצוב קשיח למניעת "יוזמות" AI
-st.set_page_config(page_title="מנתח פנסיה - גרסה 38.0", layout="wide")
+# הגדרות RTL ועיצוב קשיח
+st.set_page_config(page_title="מנתח פנסיה - גרסה 39.0", layout="wide")
 
 st.markdown("""
 <style>
@@ -32,7 +32,7 @@ def clean_num(val):
     except: return 0.0
 
 def perform_cross_validation(data):
-    """אימות הצלבה בין טבלה ב' ל-ה'"""
+    """אימות הצלבה: טבלה ב' מול טבלה ה'"""
     dep_b = 0.0
     for r in data.get("table_b", {}).get("rows", []):
         row_str = " ".join(str(v) for v in r.values())
@@ -52,69 +52,62 @@ def get_styled_df(rows, col_order):
     existing = [c for c in col_order if c in df.columns]
     return df[existing]
 
-def process_audit_v38(client, text):
-    # פרומפט "מעתיק מכני" (גירסה 29) למניעת עיגול ופרשנות
+def process_audit_v39(client, text):
+    # פרומפט "מעתיק מכני" מחמיר (גירסה 29)
     prompt = f"""You are a MECHANICAL SCRIBE. Your ONLY job is to transcribe text to JSON with ZERO intelligence applied.
-    
-    CRITICAL RULES:
-    1. ZERO ROUNDING: Copy decimals exactly (e.g., 0.17% stays 0.17%). Do NOT flip digits (67 stays 67).
-    2. TABLE D (CLAL SPECIAL): Join multiline track names. Find the EXACT '%' value nearby.
-    3. TABLE E SUMMARY: Stop at the first 'סה"כ' row. Map sums digit-by-digit. Clear 'מועד' and 'חודש'.
-    
-    JSON STRUCTURE:
-    {{
-      "table_a": {{"rows": [{{"תיאור": "", "סכום בש\"ח": ""}}]}},
-      "table_b": {{"rows": [{{"תיאור": "", "סכום בש\"ח": ""}}]}},
-      "table_c": {{"rows": [{{"תיאור": "", "אחוז": ""}}]}},
-      "table_d": {{"rows": [{{"מסלול": "", "תשואה": ""}}]}},
-      "table_e": {{"rows": [{{ "שם המעסיק": "", "מועד": "", "חודש": "", "שכר": "", "עובד": "", "מעסיק": "", "פיצויים": "", "סה\"כ": "" }}]}}
-    }}
+    RULES:
+    1. ZERO ROUNDING: Copy decimals exactly (e.g., 0.17% stays 0.17%).
+    2. TABLE D: Track names in 'Clal' often span multiple lines. Join them. Copy track return '%' EXACTLY.
+    3. TABLE E SUMMARY: Stop at the first 'סה"כ' row. Extract numbers in their exact PDF order.
     TEXT: {text}"""
     
     res = client.chat.completions.create(
         model="gpt-4o",
-        messages=[{"role": "system", "content": "OCR mode. Copy verbatim. No logic. No rounding."},
+        messages=[{"role": "system", "content": "Mechanical OCR tool. Copy verbatim. No logic. No rounding."},
                   {"role": "user", "content": prompt}],
         temperature=0,
         response_format={"type": "json_object"}
     )
     data = json.loads(res.choices[0].message.content)
     
-    # תיקון שורת סיכום ב-Python למניעת הסטת עמודות
+    # לוגיקת תיקון שורת סיכום ב-Python למניעת הסטות
     rows_e = data.get("table_e", {}).get("rows", [])
     if len(rows_e) > 1:
         last_row = rows_e[-1]
+        
+        # 1. חישוב שכר נקי ע"י Python
         salary_sum = sum(clean_num(r.get("שכר", 0)) for r in rows_e[:-1])
+        
+        # 2. חילוץ המספרים מהשורה האחרונה (עובד, מעסיק, פיצויים, סה"כ)
         vals = [last_row.get(k) for k in ["עובד", "מעסיק", "פיצויים", "סה\"כ"]]
-        c_vals = [clean_num(v) for v in vals]
-        max_v = max(c_vals)
+        clean_vals = [v for v in vals if clean_num(v) > 0]
         
-        if max_v > 0 and clean_num(last_row.get("סה\"כ")) != max_v:
-            non_zero = [v for v in vals if clean_num(v) > 0]
-            if len(non_zero) >= 3:
-                last_row["סה\"כ"] = non_zero[-1]
-                last_row["מעסיק"] = non_zero[-2]
-                last_row["עובד"] = non_zero[-3]
-        
+        # בדוחות כלל/מגדל, הסדר הוא בד"כ עובד (0), מעסיק (1), פיצויים (2), סה"כ (3)
+        if len(clean_vals) == 4:
+            last_row["עובד"] = clean_vals[0]
+            last_row["מעסיק"] = clean_vals[1]
+            last_row["פיצויים"] = clean_vals[2]
+            last_row["סה\"כ"] = clean_vals[3]
+            
         last_row["שכר"] = f"{salary_sum:,.0f}"
         last_row["מועד"], last_row["חודש"], last_row["שם המעסיק"] = "", "", "סה\"כ"
+        
     return data
 
 # ממשק
-st.title("📋 חילוץ נתונים פנסיוני - גרסה 38.0")
+st.title("📋 מנתח פנסיה - גרסה 39.0")
 client = init_client()
 
 if client:
     file = st.file_uploader("העלה דוח PDF", type="pdf")
     if file:
-        with st.spinner("מעתיק נתונים במדויק (ללא עיגול)..."):
+        with st.spinner("מעתיק נתונים במדויק..."):
             raw_text = "\n".join([page.get_text() for page in fitz.open(stream=file.read(), filetype="pdf")])
-            data = process_audit_v38(client, raw_text)
+            data = process_audit_v39(client, raw_text)
             
             if data:
                 perform_cross_validation(data)
                 
-                # הכנת DataFrames
                 dfs = {
                     "A": get_styled_df(data.get("table_a", {}).get("rows"), ["תיאור", "סכום בש\"ח"]),
                     "B": get_styled_df(data.get("table_b", {}).get("rows"), ["תיאור", "סכום בש\"ח"]),
@@ -127,12 +120,11 @@ if client:
                     st.subheader(title)
                     st.table(dfs[k])
                 
-                # יצירת קובץ אקסל מאוחד - תיקון מלא של כל השגיאות
+                # יצירת אקסל - תיקון הפקודות והסוגריים
                 output = io.BytesIO()
                 try:
                     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
                         sheet_name = 'ריכוז נתונים'
-                        # כתיבת טבלאות לפי עמודות B, E, H, K, N
                         if dfs["A"] is not None: dfs["A"].to_excel(writer, sheet_name=sheet_name, startcol=1, startrow=1, index=False)
                         if dfs["B"] is not None: dfs["B"].to_excel(writer, sheet_name=sheet_name, startcol=4, startrow=1, index=False)
                         if dfs["C"] is not None: dfs["C"].to_excel(writer, sheet_name=sheet_name, startcol=7, startrow=1, index=False)
@@ -143,20 +135,20 @@ if client:
                         worksheet = writer.sheets[sheet_name]
                         fmt = workbook.add_format({'bold': True, 'align': 'right'})
                         
-                        # הוספת כותרות ידניות
                         worksheet.write(0, 1, "טבלה א - תשלומים צפויים", fmt)
                         worksheet.write(0, 4, "טבלה ב - תנועות בקרן", fmt)
                         worksheet.write(0, 7, "טבלה ג - דמי ניהול", fmt)
                         worksheet.write(0, 10, "טבלה ד - מסלולי השקעה", fmt)
                         worksheet.write(0, 13, "טבלה ה - פירוט הפקדות", fmt)
                         
-                        worksheet.set_right_to_left()
+                        # הפקודה המתוקנת
+                        worksheet.right_to_left()
 
                     st.markdown("---")
                     st.download_button(
-                        label="📥 הורד קובץ Excel מאוחד",
+                        label="📥 הורד קובץ Excel מאוחד (גרסה 39)",
                         data=output.getvalue(),
-                        file_name="pension_report_unified.xlsx",
+                        file_name="pension_report_v39.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                     )
                 except Exception as e:
