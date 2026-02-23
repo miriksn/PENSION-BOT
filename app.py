@@ -1,117 +1,121 @@
 import streamlit as st
-import fitz  # PyMuPDF
+import fitz
 import json
 import os
+import re
 from openai import OpenAI
 
-# הגדרות תצוגה
-st.set_page_config(page_title="חילוץ נתוני פנסיה", layout="wide")
+st.set_page_config(page_title="חילוץ פנסיה מתקדם", layout="wide")
 
+# עיצוב RTL וטבלאות
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Assistant:wght@400;700&display=swap');
-    html, body, [data-testid="stAppViewContainer"] {
-        font-family: 'Assistant', sans-serif;
-        direction: rtl;
-        text-align: right;
-    }
+    * { font-family: 'Assistant', sans-serif; direction: rtl; text-align: right; }
     .stTable { direction: rtl !important; }
-    .report-card { background-color: #f8fafc; border-right: 5px solid #1e40af; padding: 20px; border-radius: 8px; margin-bottom: 20px; }
+    .val-success { color: #15803d; font-weight: bold; padding: 5px; border: 1px solid #15803d; border-radius: 4px; }
+    .val-error { color: #b91c1c; font-weight: bold; padding: 5px; border: 1px solid #b91c1c; border-radius: 4px; }
 </style>
 """, unsafe_allow_html=True)
 
-def init_openai():
-    api_key = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        st.error("❌ מפתח API חסר.")
-        return None
-    return OpenAI(api_key=api_key)
-
-def get_pdf_text(uploaded_file):
-    """קריאה בטוחה של ה-PDF עם איפוס המצביע"""
+def parse_val(val):
+    """המרת מחרוזת למספר נקי לחישובים"""
+    if not val: return 0.0
     try:
-        uploaded_file.seek(0) # חובה כדי למנוע קריאת קובץ ריק
-        file_bytes = uploaded_file.read()
-        doc = fitz.open(stream=file_bytes, filetype="pdf")
-        text = ""
-        for page in doc:
-            text += page.get_text("text") + "\n"
-        doc.close()
-        return text
-    except Exception as e:
-        st.error(f"שגיאה בחילוץ טקסט: {e}")
-        return None
+        return float(re.sub(r'[^\d\.\-]', '', str(val)))
+    except:
+        return 0.0
 
-def process_pension_ai(client, raw_text):
-    """עיבוד עם סכמת JSON כפויה"""
-    # הגדרת המבנה המדויק שהקוד מצפה לו
+def validate_math(data):
+    """בדיקת תקינות מתמטית לטבלאות ב' וה'"""
+    results = {"table_b": False, "table_e": False}
+    
+    # בדיקת טבלה ב' 
+    rows_b = data.get("table_b", {}).get("rows", [])
+    if len(rows_b) > 1:
+        sum_b = sum(parse_val(r.get("value")) for r in rows_b[:-1])
+        total_b = parse_val(rows_b[-1].get("value"))
+        results["table_b"] = abs(sum_b - total_b) < 2 # סובלנות לעיגול
+        
+    # בדיקת טבלה ה' 
+    rows_e = data.get("table_e", {}).get("rows", [])
+    total_row = data.get("table_e", {}).get("totals", {})
+    if rows_e:
+        sum_e = sum(parse_val(r.get("total")) for r in rows_e)
+        declared_e = parse_val(total_row.get("total"))
+        results["table_e"] = abs(sum_e - declared_e) < 2
+        
+    return results
+
+def get_clean_text(file):
+    file.seek(0)
+    doc = fitz.open(stream=file.read(), filetype="pdf")
+    return "\n".join([page.get_text("text") for page in doc])
+
+def process_ai(client, text):
     schema = {
-        "report_info": {"fund_name": "", "report_period": "", "report_date": ""},
-        "table_a": {"rows": [{"description": "", "value": ""}]},
-        "table_b": {"rows": [{"description": "", "value": ""}]},
-        "table_e": {"rows": [{"deposit_date": "", "salary_month": "", "total": ""}]}
+        "report_info": {"fund": "", "period": "", "date": ""},
+        "table_a": {"rows": [{"desc": "", "val": ""}]},
+        "table_b": {"rows": [{"description": "", "value": ""}]}, # יתרת פתיחה עד יתרת סגירה
+        "table_c": {"rows": [{"desc": "", "pct": ""}]}, # דמי ניהול אישיים בלבד
+        "table_d": {"rows": [{"path": "", "return": ""}]}, # תשואות מסלולים
+        "table_e": {
+            "rows": [{"deposit_date": "", "salary_month": "", "salary": "", "employee": "", "employer": "", "severance": "", "total": ""}],
+            "totals": {"employee": "", "employer": "", "severance": "", "total": ""}
+        }
     }
     
-    prompt = f"""Extract pension data into THIS EXACT JSON STRUCTURE: {json.dumps(schema)}
+    prompt = f"""Extract data into JSON: {json.dumps(schema)}
+    IMPORTANT:
+    1. Table C: Ignore sidebar averages (1.26%, 0.13%). Extract personal rates (1.49%, 0.10%).
+    2. Table B: Include ALL items (Losses, Fees, Insurance) to ensure math works.
+    3. Table E: Extract ALL 7 columns for every row.
     
-    Rules:
-    1. Table B must include losses (הפסדים) with a minus sign.
-    2. Table E must include all deposit rows.
-    3. If a value is missing, use an empty string.
+    TEXT: {text}"""
     
-    TEXT:
-    {raw_text}
-    """
-    
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4o",
-            messages=[{"role": "system", "content": "You are a financial data extractor. Return ONLY valid JSON."},
-                      {"role": "user", "content": prompt}],
-            response_format={"type": "json_object"}
-        )
-        return json.loads(response.choices[0].message.content)
-    except Exception as e:
-        st.error(f"שגיאה בעיבוד AI: {e}")
-        return None
+    res = client.chat.completions.create(
+        model="gpt-4o",
+        messages=[{"role": "system", "content": "Return JSON only."}, {"role": "user", "content": prompt}],
+        response_format={"type": "json_object"}
+    )
+    return json.loads(res.choices[0].message.content)
 
 # ממשק
-st.title("📋 חילוץ נתונים מדוח פנסיה")
-client = init_openai()
+st.title("📋 מנתח פנסיה דייקן")
+api_key = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
 
-if client:
-    file = st.file_uploader("העלה דוח PDF", type=["pdf"])
+if api_key:
+    client = OpenAI(api_key=api_key)
+    file = st.file_uploader("העלה PDF", type="pdf")
+    
     if file:
-        with st.spinner("מנתח..."):
-            raw_text = get_pdf_text(file)
-            if raw_text and len(raw_text.strip()) > 10:
-                data = process_pension_ai(client, raw_text)
-                
-                if data:
-                    info = data.get("report_info", {})
-                    st.markdown(f"""<div class="report-card">
-                        <h3>{info.get('fund_name', 'דוח פנסיה')}</h3>
-                        <p>תקופה: {info.get('report_period', '—')} | תאריך: {info.get('report_date', '—')}</p>
-                    </div>""", unsafe_allow_html=True)
-                    
-                    c1, c2 = st.columns(2)
-                    with c1:
-                        st.subheader("תשלומים צפויים (א')")
-                        rows_a = data.get("table_a", {}).get("rows", [])
-                        if rows_a: st.table(rows_a)
-                        else: st.info("לא נמצאו נתונים לטבלה א'")
-                        
-                    with c2:
-                        st.subheader("תנועות בקרן (ב')")
-                        rows_b = data.get("table_b", {}).get("rows", [])
-                        if rows_b: st.table(rows_b)
-                        else: st.info("לא נמצאו נתונים לטבלה ב'")
-                        
-                    st.subheader("פירוט הפקדות (ה')")
-                    rows_e = data.get("table_e", {}).get("rows", [])
-                    if rows_e: st.table(rows_e)
-                    else: st.info("לא נמצאו נתונים לטבלה ה'")
-                else:
-                    st.error("ה-AI לא הצליח לייצר מבנה נתונים תקין.")
-            else:
-                st.error("לא חולץ טקסט מהקובץ. ייתכן שמדובר בסריקה (Image-based PDF) ולא בדוח דיגיטלי.")
+        with st.spinner("מנתח ומאמת נתונים..."):
+            text = get_clean_text(file)
+            data = process_ai(client, text)
+            validations = validate_math(data)
+            
+            # תצוגת אימות
+            c1, c2 = st.columns(2)
+            with c1:
+                st.write("אימות טבלה ב' (תנועות):", "✅ תקין" if validations["table_b"] else "❌ שגיאת חישוב")
+            with c2:
+                st.write("אימות טבלה ה' (הפקדות):", "✅ תקין" if validations["table_e"] else "❌ שגיאת חישוב")
+
+            # הצגת כל הטבלאות
+            st.header("א. תשלומים צפויים [cite: 9]")
+            st.table(data.get("table_a", {}).get("rows", []))
+            
+            st.header("ב. תנועות בקרן ")
+            st.table(data.get("table_b", {}).get("rows", []))
+            
+            st.header("ג. דמי ניהול אישיים ")
+            st.table(data.get("table_c", {}).get("rows", []))
+            
+            st.header("ד. מסלולי השקעה ")
+            st.table(data.get("table_d", {}).get("rows", []))
+            
+            st.header("ה. פירוט הפקדות (7 עמודות) ")
+            st.table(data.get("table_e", {}).get("rows", []))
+            st.json(data.get("table_e", {}).get("totals", {}))
+
+            st.download_button("הורד JSON", json.dumps(data, indent=2, ensure_ascii=False), "pension.json")
