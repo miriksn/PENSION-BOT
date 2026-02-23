@@ -150,11 +150,12 @@ def extract_numeric_data(pdf_bytes: bytes) -> dict:
         return rev_num(m.group(1)) if m else None
 
     def find_table_by_label(tbls, label_keywords):
-        """מוצא טבלה לפי מילות מפתח בעמודת התוויות"""
+        """מוצא טבלה לפי מילות מפתח בכל תא בטבלה"""
         for t in tbls:
             for row in t:
-                if row and len(row) > 1 and row[1]:
-                    if any(kw in str(row[1]) for kw in label_keywords):
+                if not row: continue
+                for cell in row:
+                    if cell and any(kw in str(cell) for kw in label_keywords):
                         return t
         return None
 
@@ -196,6 +197,7 @@ def extract_numeric_data(pdf_bytes: bytes) -> dict:
     result["disability_release"] = find_rev(r"שחרור מתשלום הפקדות לקרן במקרה של נכות\s+([\d,]+)")
 
     # ── תנועות בקרן — חיפוש גמיש לפי תוכן ──
+    # ניסיון ראשון: מטבלה עם שתי עמודות (ערך + תיאור)
     t_mov = find_table_by_label(tables, ["הנשה תליחתב ןרקב םיפסכה תרתי"])
     if t_mov:
         for row in t_mov:
@@ -210,6 +212,24 @@ def extract_numeric_data(pdf_bytes: bytes) -> dict:
                     result["death_insurance_cost"] = abs(val)
             except: pass
 
+    # ניסיון שני: דוח שנתי — טבלת תנועות ללא עמודת ערך → חלץ מהטקסט
+    if not result.get("accumulation"):
+        # יתרת סוף שנה
+        m = re.search(r"יתרת הכספים בקרן בסוף השנה\s+([\d,]+)", rev_text)
+        if m: result["accumulation"] = rev_num(m.group(1))
+        # יתרת סוף רבעון (כבר מכוסה ע"י הטבלה לעיל, אבל גיבוי)
+        if not result.get("accumulation"):
+            m = re.search(r"יתרת הכספים בקרן ב?-?\s*[\d./]+\s+([\d,]+)", rev_text)
+            if m: result["accumulation"] = rev_num(m.group(1))
+
+    if not result.get("disability_insurance_cost"):
+        m = re.search(r"עלות ביטוח לסיכוני נכות\s+([\d,]+)-", rev_text)
+        if m: result["disability_insurance_cost"] = rev_num(m.group(1))
+
+    if not result.get("death_insurance_cost"):
+        m = re.search(r"עלות ביטוח למקרה מוות\*?\s+([\d,]+)-", rev_text)
+        if m: result["death_insurance_cost"] = rev_num(m.group(1))
+
     # ── הפקדות — חיפוש גמיש, זיהוי חכם של עמודות ──
     t_dep = find_table_by_label(tables, ["תרוכשמ"])
     if not t_dep:
@@ -220,8 +240,10 @@ def extract_numeric_data(pdf_bytes: bytes) -> dict:
     if t_dep:
         header = t_dep[0]
         # עמודת משכורת (לא "שדוח רובע תרוכשמ" = עבור חודש משכורת)
-        sal_col = next((i for i,h in enumerate(header)
-                        if h and "תרוכשמ" in str(h) and "שדוח" not in str(h)), None)
+        # עמודת משכורת — בדוחות רבעוניים: "תרוכשמ" בלי "שדוח"
+        # בדוחות שנתיים הכותרת ממוזגת (שתי שורות) — עדיין מכילה 'תרוכשמ' 
+        # → לוקחים את העמודה הראשונה עם "תרוכשמ" בכל מקרה
+        sal_col = next((i for i,h in enumerate(header) if h and "תרוכשמ" in str(h)), None)
         # עמודת סה"כ הפקדות — אם קיימת בכותרת
         total_col = next((i for i,h in enumerate(header)
                           if h and any(x in str(h) for x in ['כ"הס', 'סה"כ', "כ'הס"])), None)
@@ -229,11 +251,17 @@ def extract_numeric_data(pdf_bytes: bytes) -> dict:
         total_salary = total_deposits = 0.0
         for row in t_dep[1:]:
             try:
-                sal = float(str(row[sal_col]).replace(",","")) if sal_col is not None else 0
+                # עמודת משכורת עשויה להיות ממוזגת עם תאריך: "-8,821 -12/2024"
+                # → נחלץ רק את המספר הראשון
+                raw_sal = str(row[sal_col] or "").strip() if sal_col is not None else ""
+                m_sal = re.match(r"-?([\d,]+)", raw_sal)
+                sal = float(m_sal.group(1).replace(",","")) if m_sal else 0
                 if sal <= 0: continue
                 if total_col is not None:
                     # יש עמודת סה"כ מוכנה (מגדל ואחרות)
-                    dep = float(str(row[total_col]).replace(",",""))
+                    raw_dep = str(row[total_col] or "").strip()
+                    m_dep = re.match(r"-?([\d,]+)", raw_dep)
+                    dep = float(m_dep.group(1).replace(",","")) if m_dep else 0
                 else:
                     # אין עמודת סה"כ — סכום כל עמודות הנומריות (פיצויים+מעסיק+עובד)
                     dep = 0.0
