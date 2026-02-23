@@ -6,7 +6,10 @@ import pandas as pd
 import re
 from openai import OpenAI
 
-st.set_page_config(page_title="מנתח פנסיה - גירסה 29.1-GEO", layout="wide")
+# -------------------------------
+# UI SETTINGS
+# -------------------------------
+st.set_page_config(page_title="מנתח פנסיה - גרסה 29.2-GEO", layout="wide")
 
 st.markdown("""
 <style>
@@ -17,9 +20,14 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+
+# -------------------------------
+# CLIENT
+# -------------------------------
 def init_client():
     api_key = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
     return OpenAI(api_key=api_key) if api_key else None
+
 
 def clean_num(val):
     try:
@@ -29,45 +37,43 @@ def clean_num(val):
         return 0.0
 
 
-# =========================
+# -------------------------------
 # GEO EXTRACTION FOR TABLE D
-# =========================
-
+# -------------------------------
 def extract_table_d_geo(doc):
     rows = []
 
     for page in doc:
-        words = page.get_text("words")  # עם קואורדינטות
+        words = page.get_text("words")  # with coordinates
 
-        # מזהים את מיקום הכותרת של טבלה ד'
+        # locate header of table D
         header_y = None
         for w in words:
-            if "מסלולי" in w[4] and "השקעה" in w[4]:
+            if "מסלולי" in w[4]:
                 header_y = w[1]
                 break
 
         if header_y is None:
             continue
 
-        # לוקחים מילים שנמצאות מתחת לכותרת ובטווח סביר
-        table_words = [w for w in words if w[1] > header_y and w[1] < header_y + 300]
+        # words under header (reasonable vertical window)
+        table_words = [w for w in words if header_y < w[1] < header_y + 300]
 
-        # קיבוץ לפי שורות (לפי y בקירוב)
+        # group by line (y)
         lines = {}
         for w in table_words:
             y_key = round(w[1], 1)
             lines.setdefault(y_key, []).append(w)
 
         for line_words in lines.values():
-            line_words.sort(key=lambda x: x[0])  # מיון לפי X
-
+            line_words.sort(key=lambda x: x[0])  # sort by X
             full_line = " ".join(w[4] for w in line_words)
 
-            # מחפשים אחוז
             match = re.search(r'-?\d+\.\d+%', full_line)
             if match:
                 percent = match.group(0)
                 name = full_line.replace(percent, "").strip()
+
                 rows.append({
                     "מסלול": name,
                     "תשואה": percent
@@ -76,10 +82,9 @@ def extract_table_d_geo(doc):
     return rows
 
 
-# =========================
-# AI FOR OTHER TABLES
-# =========================
-
+# -------------------------------
+# AI EXTRACTION FOR OTHER TABLES
+# -------------------------------
 def process_other_tables(client, text):
     prompt = f"""
 You copy characters exactly. No interpretation. No rounding.
@@ -109,6 +114,9 @@ TEXT:
     return json.loads(res.choices[0].message.content)
 
 
+# -------------------------------
+# DISPLAY
+# -------------------------------
 def display_pension_table(rows, title, col_order):
     if not rows:
         return
@@ -120,33 +128,32 @@ def display_pension_table(rows, title, col_order):
     st.table(df)
 
 
-# =========================
+# -------------------------------
 # UI
-# =========================
-
-st.title("📋 חילוץ נתונים פנסיוני - גירסה 29.1-GEO")
+# -------------------------------
+st.title("📋 חילוץ נתונים פנסיוני - גרסה 29.2-GEO")
 client = init_client()
 
 if client:
     file = st.file_uploader("העלה דוח PDF", type="pdf")
 
     if file:
-        with st.spinner("חילוץ גיאומטרי לטבלה ד'..."):
+        with st.spinner("חילוץ טקסט ונתונים..."):
 
             file_bytes = file.read()
             doc = fitz.open(stream=file_bytes, filetype="pdf")
 
-            # טבלה ד' — גיאומטרי בלבד
+            # GEO TABLE D (only)
             table_d_rows = extract_table_d_geo(doc)
 
-            # שאר הטבלאות דרך AI
+            # AI for others
             raw_text = "\n".join(
                 page.get_text("text", sort=True) for page in doc
             )
 
             other_tables = process_other_tables(client, raw_text)
 
-            # הצגה
+            # display
             display_pension_table(other_tables.get("table_a", {}).get("rows"),
                                   "א. תשלומים צפויים",
                                   ["תיאור", "סכום בש\"ח"])
