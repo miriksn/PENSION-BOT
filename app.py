@@ -128,19 +128,14 @@ def process_audit_v28(client, text):
         rate_str = str(row.get("תשואה", "")).replace("%", "").strip()
         try:
             if "." in rate_str:
-                parts = rate_str.split(".")
-                before_dot = parts[0]  # "7"
-                after_dot = parts[1]   # "10"
-                
-                # אם יש ספרות אחרי הנקודה יותר מלפניה - כנראה הפוך
+                before_dot, after_dot = rate_str.split(".")
                 if len(after_dot) > len(before_dot):
-                    # הנקודה צריכה להיות במקום ההפוך
-                    # "7.10" → dot was at position 1 from left → should be at position 1 from right
-                    all_digits = before_dot + after_dot  # "710"
-                    dot_pos_from_right = len(before_dot)  # 1
+                    # היפוך נכון: שים נקודה אחרי מספר הספרות של after_dot מהסוף
+                    all_digits = before_dot + after_dot   # "710"
+                    n = len(before_dot)                   # 1
                     reversed_digits = all_digits[::-1]    # "017"
-                    flipped = reversed_digits[:-dot_pos_from_right] + "." + reversed_digits[-dot_pos_from_right:]
-                    row["תשואה"] = flipped  # "0.17"
+                    flipped = reversed_digits[:n] + "." + reversed_digits[n:]  # "0.17" ✓
+                    row["תשואה"] = flipped
         except:
             pass
         
@@ -165,6 +160,7 @@ if client:
                 display_pension_table(data.get("table_c", {}).get("rows"), "ג. דמי ניהול והוצאות", ["תיאור", "אחוז"])
                 display_pension_table(data.get("table_d", {}).get("rows"), "ד. מסלולי השקעה", ["מסלול", "תשואה"])
                 display_pension_table(data.get("table_e", {}).get("rows"), "ה. פירוט הפקדות", ["שם המעסיק", "מועד", "חודש", "שכר", "עובד", "מעסיק", "פיצויים", "סה\"כ"])
+
 
 
 
