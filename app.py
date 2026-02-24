@@ -123,7 +123,7 @@ def process_audit_v28(client, text):
         last_row["שם המעסיק"] = "סה\"כ"
 
      # ===== תיקון טבלה ד' =====
-   rows_d = data.get("table_d", {}).get("rows", [])
+    rows_d = data.get("table_d", {}).get("rows", [])
     for row in rows_d:
         rate_str = str(row.get("תשואה", "")).replace("%", "").strip()
         try:
@@ -165,6 +165,7 @@ if client:
                 display_pension_table(data.get("table_c", {}).get("rows"), "ג. דמי ניהול והוצאות", ["תיאור", "אחוז"])
                 display_pension_table(data.get("table_d", {}).get("rows"), "ד. מסלולי השקעה", ["מסלול", "תשואה"])
                 display_pension_table(data.get("table_e", {}).get("rows"), "ה. פירוט הפקדות", ["שם המעסיק", "מועד", "חודש", "שכר", "עובד", "מעסיק", "פיצויים", "סה\"כ"])
+
 
 
 
