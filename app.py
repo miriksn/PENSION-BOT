@@ -121,9 +121,23 @@ def process_audit_v28(client, text):
         last_row["מועד"] = ""
         last_row["חודש"] = ""
         last_row["שם המעסיק"] = "סה\"כ"
-    
-    return data
 
+     # ===== תיקון טבלה ד' =====
+    rows_d = data.get("table_d", {}).get("rows", [])
+    for row in rows_d:
+        rate_str = str(row.get("תשואה", "")).replace("%", "").strip()
+        try:
+            if "." in rate_str:
+                before_dot = rate_str.split(".")[0]
+                if len(before_dot) > 1:
+                    row["תשואה"] = rate_str[::-1]
+        except:
+            pass
+        meslul = row.get("מסלול", "")
+        row["מסלול"] = meslul.replace("05", "50")
+
+    return data
+    
 # ממשק משתמש
 st.title("📋 חילוץ נתונים פנסיוני - גירסה 28.0")
 client = init_client()
@@ -143,3 +157,4 @@ if client:
                 display_pension_table(data.get("table_c", {}).get("rows"), "ג. דמי ניהול והוצאות", ["תיאור", "אחוז"])
                 display_pension_table(data.get("table_d", {}).get("rows"), "ד. מסלולי השקעה", ["מסלול", "תשואה"])
                 display_pension_table(data.get("table_e", {}).get("rows"), "ה. פירוט הפקדות", ["שם המעסיק", "מועד", "חודש", "שכר", "עובד", "מעסיק", "פיצויים", "סה\"כ"])
+
