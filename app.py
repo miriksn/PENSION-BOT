@@ -127,15 +127,15 @@ def process_audit_v28(client, text):
     for row in rows_d:
         rate_str = str(row.get("תשואה", "")).replace("%", "").strip()
         try:
-            if "." in rate_str:
-                before_dot = rate_str.split(".")[0]
-                if len(before_dot) > 1:
-                    row["תשואה"] = rate_str[::-1]
+            if "." in rate_str and rate_str.split(".")[0] != "0":
+                digits = rate_str.replace(".", "")  # "710"
+                reversed_digits = digits[::-1]       # "017"
+                # הכנסת נקודה אחרי הספרה הראשונה
+                flipped = reversed_digits[0] + "." + reversed_digits[1:]  # "0.17"
+                row["תשואה"] = flipped
         except:
             pass
-        meslul = row.get("מסלול", "")
-        row["מסלול"] = meslul.replace("05", "50")
-
+        
     return data
     
 # ממשק משתמש
@@ -157,4 +157,5 @@ if client:
                 display_pension_table(data.get("table_c", {}).get("rows"), "ג. דמי ניהול והוצאות", ["תיאור", "אחוז"])
                 display_pension_table(data.get("table_d", {}).get("rows"), "ד. מסלולי השקעה", ["מסלול", "תשואה"])
                 display_pension_table(data.get("table_e", {}).get("rows"), "ה. פירוט הפקדות", ["שם המעסיק", "מועד", "חודש", "שכר", "עובד", "מעסיק", "פיצויים", "סה\"כ"])
+
 
